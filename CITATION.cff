@@ -4,18 +4,26 @@ type: software
 title: "DORA Attestation Gatekeeper"
 abstract: >-
   Reference implementation of a supervisory gatekeeper for HSM
-  attestation verification under DORA Article 28(1)(a). Operated by
-  the National Competent Authority or EBA, the gatekeeper executes a
-  two-step verify/confirm protocol with the financial entity, signs
-  receipts that are independently verifiable against pinned vendor
-  trust anchors (Yubico, Marvell/Cavium, Microsoft Azure, Google
-  Cloud HSM), maintains a hash-chained tamper-evident audit log, and
-  enforces NCA-role-based authorisation. Companion to the
-  hsm financial-entity-side implementation.
+  attestation verification under the DORA supervisory framework
+  (Regulation (EU) 2022/2554). Operated by the National Competent
+  Authority or EBA, the gatekeeper executes a two-step verify/confirm
+  protocol with the financial entity, signs receipts that are
+  independently verifiable against pinned vendor trust anchors
+  (Yubico, Marvell/Cavium, Microsoft Azure, Google Cloud HSM),
+  maintains a hash-chained tamper-evident audit log, and enforces
+  NCA-role-based authorisation. Companion to the hsm
+  financial-entity-side implementation.
 version: "1.0.0"
 date-released: "2026-04-30"
 license: MIT
 repository-code: "https://github.com/niklasgillstrom/gatekeeper"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.19930396"
+    description: "Zenodo deposit of v1.0.0"
+  - type: doi
+    value: "10.5281/zenodo.19930311"
+    description: "Companion repository — hsm (financial-entity side)"
 authors:
   - family-names: "Gillström"
     given-names: "Niklas"
