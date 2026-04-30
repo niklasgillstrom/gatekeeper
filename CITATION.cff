@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "DORA Attestation Gatekeeper"
+abstract: >-
+  Reference implementation of a supervisory gatekeeper for HSM
+  attestation verification under DORA Article 28(1)(a). Operated by
+  the National Competent Authority or EBA, the gatekeeper executes a
+  two-step verify/confirm protocol with the financial entity, signs
+  receipts that are independently verifiable against pinned vendor
+  trust anchors (Yubico, Marvell/Cavium, Microsoft Azure, Google
+  Cloud HSM), maintains a hash-chained tamper-evident audit log, and
+  enforces NCA-role-based authorisation. Companion to the
+  hsm financial-entity-side implementation.
+version: "1.0.0"
+date-released: "2026-04-30"
+license: MIT
+repository-code: "https://github.com/niklasgillstrom/gatekeeper"
+authors:
+  - family-names: "Gillström"
+    given-names: "Niklas"
+    orcid: "https://orcid.org/0009-0001-6485-4596"
+keywords:
+  - DORA
+  - HSM
+  - attestation
+  - supervisory-gatekeeper
+  - Spring-Boot
+  - PKIX
+  - audit-log
+  - hash-chain
+  - financial-supervision
+  - Finansinspektionen
+  - EBA

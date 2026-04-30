@@ -1,0 +1,28 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "java",
+      "name": "Gatekeeper (default)",
+      "request": "launch",
+      "mainClass": "eu.gillstrom.gatekeeper.DoraAttestationGatekeeperApplication",
+      "projectName": "gatekeeper"
+    },
+    {
+      "type": "java",
+      "name": "Gatekeeper (NCA profile)",
+      "request": "launch",
+      "mainClass": "eu.gillstrom.gatekeeper.DoraAttestationGatekeeperApplication",
+      "projectName": "gatekeeper",
+      "vmArgs": "-Dspring.profiles.active=nca"
+    },
+    {
+      "type": "java",
+      "name": "Gatekeeper (EBA profile)",
+      "request": "launch",
+      "mainClass": "eu.gillstrom.gatekeeper.DoraAttestationGatekeeperApplication",
+      "projectName": "gatekeeper",
+      "vmArgs": "-Dspring.profiles.active=eba"
+    }
+  ]
+}

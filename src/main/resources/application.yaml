@@ -1,0 +1,57 @@
+## Default application configuration for the DORA Attestation Gatekeeper.
+##
+## This file is loaded for every Spring profile and provides safe defaults
+## for the reference (development) configuration. The production-shaped
+## configuration lives in application-nca.yaml and is activated via
+## --spring.profiles.active=nca.
+
+server:
+  port: 8080
+
+spring:
+  application:
+    name: gatekeeper
+
+gatekeeper:
+  audit:
+    # Tamper-evident audit log location (JSON Lines).
+    # Each append is fsynced; the file is hash-chained and signed under
+    # the active gatekeeper signing key. DORA Article 28(6) mandates
+    # 5-year retention; rotate the path through symlinks if you wish to
+    # archive periodically.
+    path: ${GATEKEEPER_AUDIT_PATH:./audit-log.jsonl}
+    # DORA Article 28(6) minimum retention. Documented here so operators
+    # can see the legal basis without consulting external docs.
+    retention-years: 5
+  registry:
+    # Approval-registry backend.
+    #   in-memory — ConcurrentHashMap, state lost on restart. Reference default.
+    #   file      — append-only JSONL journal, fsynced per write, restart-safe.
+    # The nca profile overrides this to "file".
+    mode: ${GATEKEEPER_REGISTRY_MODE:in-memory}
+    path: ${GATEKEEPER_REGISTRY_PATH:./approval-registry.jsonl}
+  signing:
+    # Reference default — generates a throwaway key at startup and
+    # warns loudly. Override to "configured" in production via the nca
+    # profile.
+    mode: ${GATEKEEPER_SIGNING_MODE:ephemeral}
+    # Comma-separated PEMs of historical signing certificates that have
+    # been retired but may still appear on receipts within the 5-year
+    # retention window. Embedded as a single property line so deployments
+    # can splice multiple certs via env var; newlines may be encoded as
+    # the two-character sequence \n.
+    retired-keys: ${GATEKEEPER_RETIRED_KEYS:}
+  security:
+    mtls:
+      enabled: ${GATEKEEPER_MTLS_ENABLED:false}
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+
+logging:
+  level:
+    eu.gillstrom.gatekeeper: INFO

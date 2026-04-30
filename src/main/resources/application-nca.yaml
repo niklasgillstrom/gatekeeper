@@ -1,0 +1,144 @@
+## NCA Verification Profile
+## Activate with: --spring.profiles.active=nca
+##
+## This profile is the production-shaped configuration for the gatekeeper
+## operated by the National Competent Authority. Key differences from the
+## reference default:
+##   - mTLS enforced on all /v1/attestation/** endpoints
+##   - ReceiptSigner bound to a configured PKCS#12 keystore
+##   - Signatory-rights registry wired to mock-registry (replace with real
+##     Bolagsverket / Swish agreement-registry adapter for production)
+
+server:
+  port: 8443
+  ssl:
+    enabled: true
+    # Server certificate presented to clients (the NCA's TLS cert)
+    key-store-type: PKCS12
+    key-store: ${GATEKEEPER_SERVER_KEYSTORE:/etc/gatekeeper/nca-tls.p12}
+    key-store-password: ${GATEKEEPER_SERVER_KEYSTORE_PASSWORD:}
+    key-alias: ${GATEKEEPER_SERVER_KEY_ALIAS:nca-tls}
+    # Trust store holding CA(s) that issued acceptable CLIENT certificates
+    trust-store-type: PKCS12
+    trust-store: ${GATEKEEPER_TRUSTSTORE:/etc/gatekeeper/client-trust.p12}
+    trust-store-password: ${GATEKEEPER_TRUSTSTORE_PASSWORD:}
+    # Require (not merely request) client certificates — this is what turns
+    # on actual mTLS at the Tomcat/Netty layer.
+    client-auth: need
+
+spring:
+  application:
+    name: gatekeeper-nca
+
+gatekeeper:
+  audit:
+    # Production path for the tamper-evident audit log. Filesystem
+    # permissions are enforced to 0640 by the gatekeeper at startup;
+    # the parent directory must be owned by the gatekeeper service
+    # account and have group-readable permission for the supervisor's
+    # offline export tooling.
+    path: /var/lib/gatekeeper/audit-log.jsonl
+    retention-years: 5
+  registry:
+    # mode=file activates AppendOnlyFileApprovalRegistry — restart-safe,
+    # journal-backed, fsynced per write. mode=in-memory falls back to the
+    # default ConcurrentHashMap implementation (state lost on restart),
+    # suitable only for tests and the reference flow.
+    mode: file
+    path: /var/lib/gatekeeper/approval-registry.jsonl
+  security:
+    mtls:
+      enabled: true
+      # Principal extractor regex.
+      #
+      # Swedish Expisoft-issued organisationscertifikat (the standard
+      # client-cert format used by Finansinspektionen and Swedish FEs)
+      # carry the org/myndighetsnummer in the SERIALNUMBER attribute,
+      # not the CN. For those certs, prefer SERIALNUMBER as the
+      # principal because it is a stable unique identifier:
+      #
+      #   principal-regex: "SERIALNUMBER=(.*?)(?:,|$)"
+      #
+      # The default below extracts CN, which is what most non-Swedish
+      # NCAs would use. Swap to SERIALNUMBER (or 2.5.4.5, the OID form)
+      # when deploying against Swedish Expisoft client certs.
+      principal-regex: "CN=(.*?)(?:,|$)"
+    roles:
+      # Map client-cert principals (extracted via principal-regex above) to
+      # gatekeeper roles. First-match-wins. SUPERVISOR has full access; FE is
+      # limited to verify/confirm.
+      #
+      # The mappings below are ILLUSTRATIVE TEMPLATES for the reference
+      # build — they do not match real Expisoft-issued client certs. A
+      # real Swedish deployment overrides them with patterns matching the
+      # NCA's actual client-cert PKI. Two realistic patterns:
+      #
+      #   When principal-regex extracts SERIALNUMBER (org/myndighetsnr):
+      #     - cn-pattern: "^202100-4235$"          # Finansinspektionen
+      #       roles: [SUPERVISOR]
+      #     - cn-pattern: "^556[0-9]{4}-[0-9]{4}$" # any Swedish AB org-nr
+      #       roles: [FE]
+      #
+      #   When principal-regex extracts CN (organisation name):
+      #     - cn-pattern: "^Finansinspektionen$"
+      #       roles: [SUPERVISOR]
+      #     - cn-pattern: "^GetSwish AB$|^.* AB$"
+      #       roles: [FE]
+      #
+      # The first form (SERIALNUMBER-based) is recommended because
+      # organisation numbers are stable across renames; CN can be edited
+      # by Expisoft on certificate renewal.
+      mappings:
+        - cn-pattern: "^FI-.*$|^supervisor-.*$|^NCA-.*$"
+          roles: [SUPERVISOR]
+        - cn-pattern: "^FE-.*$|^GetSwish.*$|^.*-FE$"
+          roles: [FE]
+      # Empty default-roles = deny by default if no pattern matches. This
+      # is the safe production posture; an unauthenticated client cert that
+      # passes mTLS but doesn't match a role pattern can still reach public
+      # endpoints (keys, anchor, health) but nothing protected.
+      default-roles: []
+  ratelimit:
+    # Token-bucket per mTLS principal (or per IP if unauthenticated).
+    # verify/confirm share one bucket; batch and registry each have their own.
+    # Capacity = burst tokens; refill-seconds = time to refill to full.
+    verify:
+      capacity: 600            # 10 rps sustained (600 per minute)
+      refill-seconds: 60
+    batch:
+      capacity: 10             # batches are expensive — strict ceiling
+      refill-seconds: 60
+    registry:
+      capacity: 120            # 2 rps — supervisory read access
+  signing:
+    # mode=configured loads the PKCS#12 signing seal; mode=ephemeral uses the
+    # reference EphemeralReceiptSigner and logs WARN on every signature.
+    mode: configured
+    keystore-path: ${GATEKEEPER_SEAL_KEYSTORE:/etc/gatekeeper/nca-seal.p12}
+    keystore-password: ${GATEKEEPER_SEAL_KEYSTORE_PASSWORD:}
+    key-alias: ${GATEKEEPER_SEAL_ALIAS:nca-seal}
+    # SHA256withRSA / SHA384withECDSA / SHA256withRSAandMGF1 (PSS)
+    algorithm: SHA256withRSA
+    # Comma-separated PEMs of historical signing certificates that
+    # have been retired. Receipts and audit anchors signed under
+    # these keys remain verifiable for the 5-year retention period
+    # via GET /v1/gatekeeper/keys.
+    retired-keys: ${GATEKEEPER_RETIRED_KEYS:}
+
+swish:
+  signatory-rights:
+    # fail-closed (default) — refuses every signatory query
+    # mock-registry — demonstration registry from JSON config
+    # production adapter names will be added when wired
+    mode: fail-closed
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+
+logging:
+  level:
+    eu.gillstrom.gatekeeper: INFO

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Rule file for versions-maven-plugin: filters out pre-release qualifiers
+    (RC, Milestone, alpha, beta, CR, snapshot, etc.) so that
+    versions:display-*-updates and versions:use-latest-releases only
+    consider stable GA releases.
+
+    Usage:
+        mvn versions:display-parent-updates       -Dmaven.version.rules="file:///$(pwd)/version-rules.xml"
+        mvn versions:display-dependency-updates   -Dmaven.version.rules="file:///$(pwd)/version-rules.xml"
+        mvn versions:display-plugin-updates       -Dmaven.version.rules="file:///$(pwd)/version-rules.xml"
+
+    Or, to apply automatically (commit the diff and run tests after):
+        mvn versions:update-parent                -Dmaven.version.rules="file:///$(pwd)/version-rules.xml" -DgenerateBackupPoms=false
+        mvn versions:use-latest-releases          -Dmaven.version.rules="file:///$(pwd)/version-rules.xml" -DgenerateBackupPoms=false
+-->
+<ruleset xmlns="https://www.mojohaus.org/VERSIONS/RULES/2.1.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="https://www.mojohaus.org/VERSIONS/RULES/2.1.0
+                             https://www.mojohaus.org/versions/versions-model/xsd/rule-2.1.0.xsd">
+    <ignoreVersions>
+        <!-- Pre-release qualifiers in any case combination -->
+        <ignoreVersion type="regex">(?i).*[.-](alpha|beta|rc|cr|m|milestone|pre|preview|dev|ea|snapshot)[.-]?\d*.*</ignoreVersion>
+        <!-- Spring's milestone/RC convention: 1.2.3-M1, 1.2.3-RC1, 1.2.3-SNAPSHOT -->
+        <ignoreVersion type="regex">.*-(M|RC)\d+$</ignoreVersion>
+        <!-- BouncyCastle's beta-style: 1.83-beta, 1.83b -->
+        <ignoreVersion type="regex">.*[.-]?b\d+$</ignoreVersion>
+    </ignoreVersions>
+</ruleset>

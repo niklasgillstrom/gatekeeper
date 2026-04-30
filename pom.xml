@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.0.6</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>eu.gillstrom</groupId>
+    <artifactId>gatekeeper</artifactId>
+    <version>1.0.0</version>
+    <name>DORA Attestation Gatekeeper</name>
+    <description>
+        NCA-operated gatekeeper API for HSM attestation verification at
+        certificate issuance. Implements the 7-step verification flow required
+        by DORA (EU 2022/2554) for preventive cryptographic key compliance in
+        payment infrastructure, with a tamper-evident audit log designed to
+        satisfy the legal evidence requirements of supervisory inspections and
+        administrative or judicial proceedings.
+
+        Legal basis (Union law):
+          DORA Regulation (EU) 2022/2554 — substantive obligations:
+            Articles 5(2)(b), 6(10), 9(2), 9(3)(b)(c)(d), 9(4)(d),
+            16, 28(1)(a), 28(6) (5-year retention of ICT third-party records),
+            30(2)(c).
+          DORA Regulation (EU) 2022/2554 — supervisory framework directly
+            supported by this code:
+            Article 32 (oversight forum, joint committee structure);
+            Article 33(3)(a)(c)(g) (the comprehensive ICT-risk and ICT-audit
+              criteria the Lead Overseer assesses; the audit log + signed
+              receipts produce the evidence for that assessment);
+            Article 35(1)(a) (request for all relevant information and
+              documentation — implemented via /v1/audit/witness/{id},
+              /v1/audit/range, /v1/audit/entity, /v1/audit/export);
+            Article 35(1)(c)(d) (reports of remedial measures, recommendations);
+            Article 35(6)–(11) (periodic penalty payments and procedural
+              guarantees — the audit log is the evidentiary basis);
+            Article 36 (cross-border exercise of supervisory powers);
+            Article 37 (formal request for information procedure);
+            Article 38 (general investigations — examine documents, take
+              copies, summon representatives);
+            Article 39 (on-site inspections — the audit log is the off-site
+              evidence equivalent);
+            Article 40 (ongoing supervision via the Joint Examination Team —
+              the audit log persists across team rotations);
+            Article 41 (harmonisation of supervisory conditions; future RTS
+              under this article will refine the audit-evidence format);
+            Article 42 (competent authorities' follow-up of Lead Overseer
+              recommendations — receipt-publication and key-publication
+              endpoints support this directly);
+            Article 50(2) (administrative powers: access to documents, on-site
+              inspection, corrective measures, telecom-data access);
+            Article 51 (exercise of penalty powers);
+            Article 54 (publication of administrative penalties);
+            Article 55 (professional secrecy — applies to information held in
+              the audit log);
+            Article 56 (data protection; 15-year maximum retention by competent
+              authorities — caps audit-log retention from above where the
+              minimum DORA Art 28(6) of 5 years caps it from below).
+          EBA Regulation (EU) 1093/2010 — Articles 16, 17(4), 17(6), 29, 35(1).
+          GDPR Regulation (EU) 2016/679 — Articles 5(1)(c)(e), 17, 23, 32.
+          NIS2 Directive (EU) 2022/2555 — Articles 14, 21, 23.
+
+        Legal basis (Swedish national law for FI inspection authority):
+          Cybersäkerhetslag (2025:1506) — NIS2 implementation; FI tillsynsorgan
+            för finansiell sektor under 2 kap. och 8 kap.
+          Lag (2004:297) om bank- och finansieringsrörelse — 13 kap. tillsyn
+          Lag (2010:751) om betaltjänster — 8 kap. tillsyn av betaltjänstleverantörer
+          Lag (2007:528) om värdepappersmarknaden — 23 kap. tillsyn
+          Lag (2017:630) om åtgärder mot penningtvätt och finansiering av
+            terrorism — 7 kap. tillsyn (kompletterar AML-aspekter av flödet)
+          Förordning (2009:93) med instruktion för Finansinspektionen
+          Förvaltningslag (2017:900) — handläggning vid förvaltningsärenden
+          Offentlighets- och sekretesslag (2009:400) — 30 kap. för finansiella
+            tillsynsärenden; styr vad i auditloggen som kan lämnas ut
+          Bokföringslag (1999:1078) — 7 kap. arkiveringsregler (parallell med
+            DORA Art 28(6) — affärshändelser; minst 7 år)
+    </description>
+
+    <developers>
+        <developer>
+            <id>gillstrom</id>
+            <name>Niklas Gillström</name>
+            <url>https://orcid.org/0009-0001-6485-4596</url>
+        </developer>
+    </developers>
+
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <properties>
+        <java.version>21</java.version>
+    </properties>
+
+    <dependencies>
+        <!-- Spring Boot -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+
+        <!-- Rate limiting (token-bucket algorithm) -->
+        <dependency>
+            <groupId>com.bucket4j</groupId>
+            <artifactId>bucket4j_jdk17-core</artifactId>
+            <version>8.18.0</version>
+        </dependency>
+
+        <!-- OpenAPI / Swagger -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>3.0.3</version>
+        </dependency>
+
+        <!-- BouncyCastle for certificate parsing and verification -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+            <version>1.84</version>
+        </dependency>
+
+        <!-- Lombok -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Test -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>1.18.46</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+
+            <!--
+                Maven Enforcer — fails the build if Maven itself is older than
+                3.6.3. This is the floor required by the OWASP Dependency-Check
+                plugin 12.x configured below; it is also a sensible baseline
+                given Spring Boot 4.x's own toolchain assumptions. Without this
+                rule, an operator running an old Maven would silently fall back
+                to an older OWASP plugin and miss CVE checks the build is
+                supposed to enforce.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>3.6.2</version>
+                <executions>
+                    <execution>
+                        <id>enforce-maven</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireMavenVersion>
+                                    <version>3.6.3</version>
+                                </requireMavenVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+                OWASP Dependency-Check — continuous CVE scanning over all
+                project dependencies (and their transitives). Required for
+                ongoing operational hygiene of a supervisory artefact under
+                DORA Article 9 (ICT risk management) and Article 16
+                (vulnerability management). Failing the build on
+                CVSS >= 7.0 (HIGH/CRITICAL) is the operational baseline;
+                MEDIUM and LOW findings are reported but do not break the
+                build, so the operator can triage them via the suppression
+                file (.owasp-suppressions.xml in the repo root) when
+                appropriate.
+
+                First run downloads the NVD database (~150 MB, cached in
+                ~/.m2). Setting the NVD_API_KEY environment variable
+                (https://nvd.nist.gov/developers/request-an-api-key) raises
+                the rate limit from 5 to 50 calls per 30s and is strongly
+                recommended for any pipeline that runs frequently.
+            -->
+            <plugin>
+                <groupId>org.owasp</groupId>
+                <artifactId>dependency-check-maven</artifactId>
+                <version>12.2.1</version>
+                <configuration>
+                    <failBuildOnCVSS>7</failBuildOnCVSS>
+                    <formats>
+                        <format>HTML</format>
+                        <format>JSON</format>
+                    </formats>
+                    <suppressionFiles>
+                        <suppressionFile>${project.basedir}/.owasp-suppressions.xml</suppressionFile>
+                    </suppressionFiles>
+                    <nvdApiKey>${env.NVD_API_KEY}</nvdApiKey>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

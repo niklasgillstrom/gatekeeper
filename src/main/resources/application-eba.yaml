@@ -1,0 +1,24 @@
+## EBA Verification Profile
+## Activate with: --spring.profiles.active=eba
+##
+## This profile enables the EBA independent verification endpoints.
+## These endpoints allow EBA to verify HSM attestation without
+## requiring the entity's cooperation.
+
+server:
+  port: 8080
+
+spring:
+  application:
+    name: hsm
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+
+logging:
+  level:
+    eu.gillstrom.hsm: DEBUG
