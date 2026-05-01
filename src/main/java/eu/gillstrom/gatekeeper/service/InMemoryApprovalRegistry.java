@@ -143,6 +143,26 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
     }
 
     @Override
+    public Optional<RegistryEntry> findByPublicKeyFingerprint(String fingerprint) {
+        if (fingerprint == null || fingerprint.isBlank()) {
+            return Optional.empty();
+        }
+        // Prefer compliant entries; fall back to most recent non-compliant.
+        Optional<RegistryEntry> compliantMatch = entries.values().stream()
+                .filter(e -> fingerprint.equals(e.getPublicKeyFingerprint())
+                        || fingerprint.equals(e.getActualPublicKeyFingerprint()))
+                .filter(RegistryEntry::isCompliant)
+                .findFirst();
+        if (compliantMatch.isPresent()) {
+            return compliantMatch;
+        }
+        return entries.values().stream()
+                .filter(e -> fingerprint.equals(e.getPublicKeyFingerprint())
+                        || fingerprint.equals(e.getActualPublicKeyFingerprint()))
+                .findFirst();
+    }
+
+    @Override
     public ComplianceStats getStats(String countryCode) {
         List<RegistryEntry> countryEntries = findByCountry(countryCode);
         long total = countryEntries.size();

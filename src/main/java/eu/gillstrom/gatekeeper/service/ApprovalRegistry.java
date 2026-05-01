@@ -119,6 +119,31 @@ public interface ApprovalRegistry {
     /** Find all entries awaiting Step 7 confirmation. */
     List<RegistryEntry> findAwaitingConfirmation();
 
+    /**
+     * Find a registry entry by the public-key fingerprint of the certificate.
+     *
+     * <p>Used by the settlement-time signature verification endpoint
+     * ({@code POST /api/v1/verify}) to determine whether a settlement-time
+     * signature corresponds to a gatekeeper-audited certificate. The
+     * fingerprint is the canonical SHA-256 of the X.509 SubjectPublicKeyInfo
+     * encoding (DER), upper-case hex, colon-separated — produced by
+     * {@code GatekeeperFingerprintFormatter} or its equivalent at the FE
+     * side.
+     *
+     * <p>If multiple entries share the same fingerprint (e.g. after
+     * certificate renewal — same key, new cert, new verification), the
+     * most recent compliant entry wins. If no compliant entry exists,
+     * the most recent non-compliant entry is returned so the caller can
+     * see the non-compliant verdict.
+     *
+     * @param fingerprint canonical SHA-256 fingerprint of the public key
+     * @return registry entry if found, empty if no audit entry exists for
+     *     this public key
+     */
+    default Optional<RegistryEntry> findByPublicKeyFingerprint(String fingerprint) {
+        return Optional.empty();
+    }
+
     /** Compliance statistics for a given country code. */
     ComplianceStats getStats(String countryCode);
 

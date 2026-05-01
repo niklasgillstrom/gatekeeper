@@ -134,6 +134,15 @@ public class SecurityConfig {
                         "/v1/attestation/*/confirm"
                 ).hasAnyRole("FE", "SUPERVISOR")
 
+                // Settlement-rail enforcement (railgate or equivalent).
+                // The typical caller is a central-bank settlement system
+                // calling this endpoint at settlement-time to verify a
+                // cryptographic signature against a previously audited
+                // certificate. SUPERVISOR role is also accepted for sandbox
+                // and incident-response scenarios.
+                .requestMatchers(HttpMethod.POST, "/api/v1/verify")
+                        .hasAnyRole("SETTLEMENT_RAIL", "SUPERVISOR")
+
                 // Anything else under /v1/attestation that isn't covered
                 // by an explicit matcher requires authentication; deny
                 // everything outside /v1/* by default.

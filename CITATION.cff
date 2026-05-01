@@ -4,30 +4,38 @@ type: software
 title: "DORA Attestation Gatekeeper"
 abstract: >-
   Reference implementation of a supervisory gatekeeper for HSM
-  attestation verification under the DORA supervisory framework
-  (Regulation (EU) 2022/2554). Operated by the National Competent
-  Authority or EBA, the gatekeeper executes a two-step verify/confirm
+  attestation verification under DORA. Operated by the National
+  Competent Authority, the gatekeeper executes a two-step verify/confirm
   protocol with the financial entity, signs receipts that are
-  independently verifiable against pinned vendor trust anchors
-  (Yubico, Marvell/Cavium, Microsoft Azure, Google Cloud HSM),
-  maintains a hash-chained tamper-evident audit log, and enforces
-  NCA-role-based authorisation. Companion to the hsm
-  financial-entity-side implementation.
-version: "1.0.0"
-date-released: "2026-04-30"
+  independently verifiable against pinned vendor trust anchors (Yubico,
+  Marvell/Cavium, Microsoft Azure, Google Cloud HSM), maintains a
+  hash-chained tamper-evident audit log, and enforces NCA-role-based
+  authorisation. Version 1.1.0 adds a settlement-time signature
+  verification endpoint (POST /api/v1/verify) for use by settlement-rail
+  enforcement components such as railgate, supporting the
+  data-minimised quadruple-triangulation model: only digest, signature,
+  and certificate identifiers traverse the supervisor boundary —
+  transaction payload content is never exposed to the supervisor.
+  Companions: hsm (financial-entity-side HSM attestation verification)
+  and railgate (central-bank settlement-rail enforcement).
+version: "1.1.0"
+date-released: "2026-05-01"
 license: MIT
 repository-code: "https://github.com/niklasgillstrom/gatekeeper"
-identifiers:
-  - type: doi
-    value: "10.5281/zenodo.19930396"
-    description: "Zenodo deposit of v1.0.0"
-  - type: doi
-    value: "10.5281/zenodo.19930311"
-    description: "Companion repository — hsm (financial-entity side)"
 authors:
   - family-names: "Gillström"
     given-names: "Niklas"
     orcid: "https://orcid.org/0009-0001-6485-4596"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.19930395"
+    description: "Concept DOI — resolves to the latest version of gatekeeper."
+  - type: doi
+    value: "10.5281/zenodo.19930310"
+    description: "Companion: hsm — HSM attestation verification (financial entity side). Concept DOI — resolves to the latest version."
+  - type: doi
+    value: "10.5281/zenodo.19952991"
+    description: "Companion: railgate — settlement-rail enforcement reference (consumes the /api/v1/verify endpoint introduced in this version). Concept DOI — resolves to the latest version."
 keywords:
   - DORA
   - HSM
@@ -38,5 +46,8 @@ keywords:
   - audit-log
   - hash-chain
   - financial-supervision
+  - settlement-time-verification
+  - data-minimisation
+  - GDPR-Art-5
   - Finansinspektionen
   - EBA
