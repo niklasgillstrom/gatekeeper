@@ -1,6 +1,21 @@
 # Threat model — gatekeeper
 
-**Scope.** Threat model for the supervisory gatekeeper API that sits between an NCA / EBA and HSM vendors' attestation roots. The companion reference library (`hsm/`) has its own threat model covering the verifier core and the BankID-issuance flow. Both threat models overlap where verifier behaviour is concerned; this document focuses on what becomes new or different when the verifier is exposed as a REST API operated by a regulator.
+**Scope.** Threat model for the supervisory gatekeeper API that sits between an NCA / EBA and HSM vendors' attestation roots. The companion reference libraries (`hsm/` and `railgate/`) have their own threat models covering the verifier core, the BankID-issuance flow, and the settlement-rail enforcement layer respectively. Threat models overlap where verifier behaviour is concerned; this document focuses on what becomes new or different when the verifier is exposed as a REST API operated by a regulator.
+
+**v1.2.0 scope additions.** From v1.2.0 the gatekeeper exposes `POST /api/v1/verify` for settlement-time signature verification consumed by railgate. The settlement-time threats are summarised in the section below before the STRIDE analysis.
+
+## Settlement-time verification threats (v1.2.0)
+
+| Threat | Mitigation | Residual risk |
+|---|---|---|
+| **Forged signing certificate** — caller submits a PEM that is not from a gatekeeper-audited issuance | Audit lookup by SHA-256 fingerprint of the SubjectPublicKeyInfo. Unknown fingerprint returns `CERT_NOT_FOUND` — settlement is default-denied. | Operator must keep the approval registry authoritative (production deployment uses `AppendOnlyFileApprovalRegistry`, not in-memory). |
+| **Replayed signature against tampered digest** — caller submits a valid signature with a different digest in an attempt to bind it to a different transaction | SHA-512 collision resistance (256-bit security level) makes it computationally infeasible to find a different payload producing the same digest. Cryptographic verification fails with `SIGNATURE_INVALID`. | Negligible. |
+| **Algorithm-downgrade injection** — caller specifies a weak `algorithm` parameter | Allowlist enforced via JCA provider lookup; unknown algorithms return `ALGORITHM_NOT_SUPPORTED`. Operators MUST NOT register weak algorithms (MD5, SHA-1, RC4) in the JCA provider. | Operational — production deployments should disable weak JCA algorithms via `java.security` policy. |
+| **Payload-content leakage to supervisor** — caller submits transaction payload alongside the digest | Endpoint contract does not include a payload field. The verifier never decodes or stores anything beyond `(certSerial, issuerDn, digestHex, signatureBase64, signingCertificatePem, algorithm)`. SHA-512 digest is one-way; the transaction payload cannot be recovered from the digest. | Negligible (cryptographic property). |
+| **Compliance-state staleness** — caller relies on a compliance flag that has changed since issuance | Compliance lookup is performed at each verify call against the current registry state, not against a cached snapshot. A previously compliant cert that is later flagged as anomalous (e.g. via Step-7 mismatch) returns `CERT_NON_COMPLIANT` on the next verify call. | Operator must maintain the registry's append-only integrity; tampering threats covered under Tampering section below. |
+| **Settlement-rail-impersonation** — adversary calls `/api/v1/verify` directly without being a real settlement system | `SecurityConfig` restricts the endpoint to clients holding the `SETTLEMENT_RAIL` or `SUPERVISOR` role. Production deployments use mTLS with NCA-issued client certificates. | Standard mTLS operational risks (certificate management, revocation handling). |
+
+---
 
 **Assumptions out of scope.** The host platform (network, OS, JVM, container runtime) is modelled operationally in `HARDWARE_BASELINE.md` §3.1 (locked rack, dual-ISP, UPS, FDE with manual unlock, Wazuh SIEM, gapless HSM audit) for the case-study deployment. The threat model below treats those as sound.
 

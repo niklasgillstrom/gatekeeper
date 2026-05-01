@@ -184,6 +184,21 @@ Specific cadence is a supervisory-policy decision under DORA Article 50, not a r
 
 The trigger thresholds for moving up the trappa (e.g. ≥ 3 unmatched certs in one quarter, ≥ 1 unmatched cert with confirmed payment usage) are supervisory-policy decisions and should be documented in the NCA's internal sanctions-policy guidance separately from this runbook.
 
+### 3.6 Settlement-time signature verification (since v1.2.0)
+
+Scenario: the central-bank settlement-rail operator (Sveriges Riksbank for RIX-INST) deploys the railgate companion artefact in front of the settlement pipeline. For every regulated payment, railgate retrieves the SHA-512 digest, signature, and certificate identifiers from the payment-network operator (Getswish AB in the Swedish reference deployment) and submits them to the gatekeeper's `POST /api/v1/verify` endpoint at settlement time.
+
+**Operational responsibilities of the NCA:**
+
+- **Provision a `SETTLEMENT_RAIL`-role mTLS certificate** to the settlement-rail operator (typically the central bank) following the role-mapping convention in `DEPLOYMENT.md` §4. This certificate authorises the settlement-rail clients to call `/api/v1/verify`.
+- **Monitor the rate of `CERT_NOT_FOUND` and `SIGNATURE_INVALID` decisions.** A sudden rise indicates either (a) an issuance flow that is bypassing gatekeeper (a breach detection signal), or (b) a settlement-rail integration regression. Either case warrants supervisory follow-up.
+- **Reconcile the gatekeeper audit log against the settlement-rail logs.** The settlement-rail operator's logs of allowed/denied settlements must reconcile with the gatekeeper audit-entry references returned in the `auditEntryId` field. Discrepancies indicate either log-tampering or mTLS-replay incidents.
+- **Coordinate with the central bank under DORA Article 32 (oversight forum).** Settlement-time enforcement is a joint operational responsibility; the gatekeeper holds the compliance state, the settlement rail holds the enforcement chokepoint.
+
+**Data minimisation envelope.** The supervisor never receives transaction payload content via `/api/v1/verify`. The endpoint contract is intentionally limited to cryptographic artefacts. The supervisor's ICT-third-party-data-processing register under DORA Article 28(3) should reflect this scope explicitly: for the settlement-time verification function, only digests, signatures, and certificate identifiers are processed.
+
+**Latency expectations.** `POST /api/v1/verify` must return well within the settlement deadline of the underlying rail (RIX-INST: sub-second; TIPS: typically under 10 seconds end-to-end). The reference implementation completes the verification in single-digit milliseconds against an in-memory registry; production deployments using the file-backed `AppendOnlyFileApprovalRegistry` should benchmark before SLA commitments.
+
 ## 4. Forensic procedures
 
 For full procedural detail, see `FORENSIC_INSPECTION.md`. This section summarises the operational entry points.

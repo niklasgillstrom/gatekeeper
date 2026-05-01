@@ -163,12 +163,22 @@ For **finer-grained FE allow-listing** (only specific supervisee org-numbers, no
 
 A separate config overlay (`application-nca-overrides.yaml` loaded via `--spring.config.additional-location=...`) is the recommended way to keep the FE allow-list maintainable without editing the bundled profile.
 
-**Two roles** are defined and have meaning to the authorisation matchers in `SecurityConfig`:
+**Three roles** are defined and have meaning to the authorisation matchers in `SecurityConfig`:
 
 | Role | Endpoints permitted |
 | --- | --- |
-| `SUPERVISOR` | Everything: audit query (`/v1/audit/**`), registry inspection (`/v1/attestation/{cc}/registry/**`), verify/confirm. For NCA staff. |
+| `SUPERVISOR` | Everything: audit query (`/v1/audit/**`), registry inspection (`/v1/attestation/{cc}/registry/**`), verify/confirm, settlement-time verification (`/api/v1/verify`). For NCA staff. |
 | `FE` | Verify protocol only: `POST /v1/attestation/{cc}/verify`, `verify/batch`, `confirm`. For supervisees calling the gatekeeper. |
+| `SETTLEMENT_RAIL` (since v1.2.0) | Settlement-time signature verification only: `POST /api/v1/verify`. For the central-bank settlement-rail operator (Sveriges Riksbank for RIX-INST; ECB for TIPS, etc.). |
+
+**Production role-mapping for `SETTLEMENT_RAIL`** — example for Swedish RIX-INST integration via Expisoft-issued client cert:
+
+```yaml
+        - cn-pattern: "^202100-2684$"             # Sveriges Riksbank
+          roles: [SETTLEMENT_RAIL]
+```
+
+The settlement-rail client provisions a single mTLS client certificate per environment (test, production) and the gatekeeper authorises it under the `SETTLEMENT_RAIL` role to call `POST /api/v1/verify`. The reference deployment scenario is documented in the railgate companion repo (`railgate/README.md`).
 
 Public endpoints (`/v1/gatekeeper/keys`, `/v1/gatekeeper/anchor`, `/v1/gatekeeper/health`, `/v1/attestation/health`, `/v1/attestation/supported-vendors`, OpenAPI/Swagger) are reachable without authentication so a relying party can verify retroactive receipt evidence under DORA Article 28(6) without holding a client cert.
 

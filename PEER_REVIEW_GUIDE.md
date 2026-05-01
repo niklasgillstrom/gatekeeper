@@ -1,6 +1,25 @@
 # Peer-review guide — gatekeeper
 
-This document is written for a peer reviewer of Article 1 (Gillström, in preparation; target venue: *Capital Markets Law Journal*) and Article 2 (Gillström, in preparation; target venue: *Computer Law & Security Review*) who wants to reproduce the central gatekeeper-level verification claims these articles make. The companion repo `hsm/` carries the verifier core. This repo carries the NCA/EBA-facing supervisory API that wraps those verifiers for regulatory use.
+This document is written for a peer reviewer of Article 1 (Gillström, in preparation; target venue: *Capital Markets Law Journal*) and Article 2 (Gillström, in preparation; target venue: *Computer Law & Security Review*) who wants to reproduce the central gatekeeper-level verification claims these articles make. Companion repos `hsm/` and `railgate/` complete the **triadic system** described in Article 1 §4.2 and Article 2 §9.3:
+
+- **hsm** carries the verifier core (financial-entity side).
+- **gatekeeper** (this repo) is the NCA-facing supervisory API that wraps those verifiers for regulatory use, and from v1.2.0 also exposes the settlement-time signature verification endpoint that railgate consumes.
+- **railgate** is the central-bank settlement-rail enforcement layer that calls gatekeeper's verification endpoint at settlement time (RIX-INST in Sweden; generalisable to TIPS, FedNow, FPS, NPP).
+
+The three components together operationalise the data-minimised quadruple-triangulation model: only digest, signature, and certificate identifiers traverse the supervisor boundary — no transaction payload content is exposed at any layer.
+
+## Version 1.2.0 — what changed and what to verify
+
+Reviewers approaching v1.2.0 should focus on the following additions relative to v1.0.0:
+
+1. **`POST /api/v1/verify`** — a new settlement-time signature verification endpoint added in v1.1.0 and documented fully in v1.2.0. See `SignatureVerificationController` and `SignatureVerificationService`. Reviewers should confirm:
+   - The verifier never receives the original transaction payload — only a SHA-512 digest. The digest is a 64-byte cryptographic hash that is collision-resistant (SHA-512 security level: 256-bit), so a valid signature over the digest uniquely binds the signature to the transaction performed.
+   - Audit lookup is performed by the SHA-256 fingerprint of the SubjectPublicKeyInfo (uppercase hex, colon-separated) — same canonical form used elsewhere in gatekeeper.
+   - The cryptographic verification mirrors the production signing flow: `Signature.getInstance("SHA512withRSA").initVerify(publicKey).update(digest).verify(signature)`.
+   - The response is binary `{signatureValid, compliant}` plus a structured reason code and the audit-entry identifier when found.
+2. **`SETTLEMENT_RAIL` role** — added to `SecurityConfig` to authorise central-bank settlement-system clients. Reviewers should confirm the matcher on `POST /api/v1/verify` requires either `SETTLEMENT_RAIL` or `SUPERVISOR`.
+3. **`ApprovalRegistry.findByPublicKeyFingerprint`** — added as a default method on the interface and implemented in both `InMemoryApprovalRegistry` and `AppendOnlyFileApprovalRegistry`. Reviewers should confirm the implementations search both `publicKeyFingerprint` and `actualPublicKeyFingerprint` and prefer compliant entries when multiple match.
+4. **Tests** — `SignatureVerificationServiceTest` (8 cases) and `SignatureVerificationControllerTest` (4 cases). Reviewers should run `mvn -B clean verify` and confirm 55 tests pass.
 
 ---
 

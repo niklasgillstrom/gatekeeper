@@ -571,6 +571,66 @@ Step 7 of the verification flow. GetSwish AB (or the issuing bank) posts the out
 
 `registryStatus` is one of: `VERIFIED_AND_ISSUED`, `VERIFIED_NOT_ISSUED`, `REJECTED_NOT_ISSUED`, `ANOMALY_ISSUED_DESPITE_REJECTION`, `ANOMALY_PUBLIC_KEY_MISMATCH`, `ANOMALY_UNKNOWN_VERIFICATION` (see `IssuanceConfirmationResponse.RegistryStatus`). `loopClosed` is `true` iff the confirmation was consistent with the registry entry and passed all binding checks; any anomaly sets it to `false` and the entry remains flagged for supervisory review.
 
+#### POST /api/v1/verify (settlement-time signature verification, since v1.2.0)
+
+Companion endpoint to the issuance-time attestation flow. Whereas the `/v1/attestation/{countryCode}/verify` endpoint runs the 7-step verification protocol at certificate issuance, this endpoint answers a different question at settlement time: *given a digest, signature, and certificate, is the signature valid and is the certificate compliant?*
+
+The intended caller is a settlement-rail enforcement layer such as **railgate**, which receives pacs.008 messages at the central-bank settlement rail (RIX-INST in Sweden, TIPS in the Eurosystem, FedNow in the US) and queries this endpoint to determine whether to allow or default-deny the settlement.
+
+**Data minimisation.** This endpoint never receives or stores transaction payload content. Only cryptographic artefacts (digest, signature, certificate) traverse the boundary. The supervisor never sees transaction amounts, sender/receiver detail, or business message content. SHA-512 collision resistance ensures the digest uniquely binds the signature to the exact transaction performed. This satisfies GDPR Article 5(1)(c) (data minimisation) and the proportionality requirement implicit in DORA Article 32 supervisory data processing.
+
+**Request:**
+
+```json
+{
+  "certSerial": "1234567890123456789",
+  "issuerDn": "CN=SEB Customer CA1 v2 for Swish, O=Skandinaviska Enskilda Banken AB (publ), C=SE",
+  "digestHex": "a3f5e8b...64-byte-hex...",
+  "signatureBase64": "Q2lyY3VsYXIuLi4=",
+  "signingCertificatePem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
+  "algorithm": "SHA512withRSA"
+}
+```
+
+`algorithm` is optional and defaults to `SHA512withRSA` (RSA-PKCS#1 v1.5 with SHA-512), the algorithm used by the reference Swish utbetalning signing flow. `signingCertificatePem` is required — the supervisor uses it to extract the public key. `algorithm`-supported values include `SHA512withRSA`, `SHA384withRSA`, `SHA256withRSA`, and PSS variants registered with the JCA provider.
+
+**Response — verified compliant signature (settle):**
+
+```json
+{
+  "signatureValid": true,
+  "compliant": true,
+  "auditEntryId": "8f1d2c4a-6b3e-4a5f-9c8d-1e2f3a4b5c6d",
+  "reason": "OK"
+}
+```
+
+**Response — cryptographically valid signature against an unknown certificate (default-deny):**
+
+```json
+{
+  "signatureValid": true,
+  "compliant": false,
+  "auditEntryId": null,
+  "reason": "CERT_NOT_FOUND"
+}
+```
+
+**Response — signature does not match digest (default-deny):**
+
+```json
+{
+  "signatureValid": false,
+  "compliant": false,
+  "auditEntryId": "8f1d2c4a-6b3e-4a5f-9c8d-1e2f3a4b5c6d",
+  "reason": "SIGNATURE_INVALID"
+}
+```
+
+`reason` is one of: `OK`, `CERT_NOT_FOUND`, `SIGNATURE_INVALID`, `CERT_NON_COMPLIANT`, `MALFORMED_INPUT`, `ALGORITHM_NOT_SUPPORTED`. The settlement-rail enforcement layer (railgate) allows the settlement if and only if both `signatureValid` and `compliant` are `true`. Any other combination triggers default-deny: the originating bank receives a structured error code and the transaction does not settle until the bank resubmits with valid data, or the settlement is abandoned.
+
+The role-based access policy in `SecurityConfig` restricts this endpoint to clients holding the `SETTLEMENT_RAIL` role (typically the central-bank settlement system) or `SUPERVISOR` (for sandbox and incident-response scenarios).
+
 ### Supported HSM Vendors
 
 | Vendor | Attestation Method | Root CA Verification |
@@ -679,4 +739,8 @@ MIT — Niklas Gillström <https://orcid.org/0009-0001-6485-4596>. Full text in 
 
 Gillström, N., *Verifieringsansvar för kryptografiska nycklar i betalinfrastruktur — En rättsdogmatisk fallstudie av kontraktuell riskallokering och DORA-förordningens krav på IKT-riskhantering*, bachelor's thesis in Commercial Law (15 ECTS), Department of Law, Uppsala University, Spring 2026. Supervisor: Docent Malou Larsson Klevhill. Available at DiVA: [link to be added after publication]
 
-Open source reference implementation: https://github.com/niklasgillstrom/hsm
+Open source reference implementations (the triadic system):
+
+- **hsm** — financial-entity-side HSM attestation verification: https://github.com/niklasgillstrom/hsm ([10.5281/zenodo.19930310](https://doi.org/10.5281/zenodo.19930310), concept DOI)
+- **gatekeeper** — this repository, NCA-operated certificate-issuance gate and settlement-time signature verification: https://github.com/niklasgillstrom/gatekeeper ([10.5281/zenodo.19930395](https://doi.org/10.5281/zenodo.19930395), concept DOI)
+- **railgate** — central-bank settlement-rail enforcement: https://github.com/niklasgillstrom/railgate ([10.5281/zenodo.19952991](https://doi.org/10.5281/zenodo.19952991), concept DOI)
