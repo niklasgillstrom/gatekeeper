@@ -280,7 +280,10 @@ public class AzureHsmVerifier implements HsmAttestationVerifier {
                 }
             }
             if (path.isEmpty()) {
-                return true;
+                // A chain consisting only of the pinned root proves nothing: the
+                // root is publicly downloadable, and no PKIX validation runs on an
+                // empty path. Matches SecurosysVerifier, which already fails here.
+                return false;
             }
             CertPath certPath = cf.generateCertPath(path);
             Set<TrustAnchor> anchors = Collections.singleton(new TrustAnchor(attestationTrustAnchor, null));
@@ -380,15 +383,25 @@ public class AzureHsmVerifier implements HsmAttestationVerifier {
     }
 
     private void parseAttestationAttributes(byte[] blob, AzureAttestationResult result) {
-        // Azure attestation blob contains key attributes in a TLV encoding.
-        // Proper parsing requires the Marvell attestation spec which is NDA-
-        // restricted; until a full parser is implemented we rely on the
-        // platform guarantee that Azure Managed HSM keys are non-exportable
-        // by default, and the exportability error case is caught structurally
-        // by the verification workflow via key-usage and attribute checks
-        // performed elsewhere.
-        result.setExportable(false);
-        result.setKeyOrigin("generated");
+        // The Azure attestation blob carries key attributes in Marvell's TLV
+        // encoding. That specification is NDA-restricted and no parser ships
+        // with this reference implementation, so exportability and key origin
+        // CANNOT be established from the blob.
+        //
+        // Deliberately no platform default is substituted here. Asserting
+        // exportable=false / origin=generated would satisfy two of the four
+        // compliance conjuncts in verify() without anything having been
+        // checked, so an imported or exportable key would be reported
+        // COMPLIANT with no signal that the check never ran.
+        //
+        // Fail closed instead: the error below is non-empty, which makes
+        // setValid(...) false, and it names precisely what a deployer must
+        // supply. Structural support for Azure Managed HSM (vendor routing,
+        // chain validation, signature and public-key binding) is unaffected.
+        result.setKeyOrigin("unverified");
+        result.addError("AZURE_ATTRIBUTES_UNVERIFIED: attestation attributes "
+                + "(exportability, key origin) could not be verified - no Marvell "
+                + "TLV parser is configured for Azure Managed HSM");
     }
 
     private String extractString(JsonNode node, String field) {

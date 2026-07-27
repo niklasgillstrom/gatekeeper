@@ -113,11 +113,26 @@ public interface ApprovalRegistry {
     /** Find all entries for a given country code (for Article 17 investigations). */
     List<RegistryEntry> findByCountry(String countryCode);
 
-    /** Find all anomalies (for supervisory review). */
-    List<RegistryEntry> findAnomalies();
+    /**
+     * Find anomalies within one jurisdiction (for supervisory review).
+     *
+     * <p>These two methods used to take no argument. {@code
+     * VerificationController} accepted a {@code countryCode} path variable
+     * on {@code /v1/attestation/&#x7b;cc&#x7d;/registry/anomalies} and
+     * {@code .../awaiting}, and then discarded it: every NCA's query
+     * returned every other Member State's rows. Taking the jurisdiction as
+     * a parameter — rather than offering an unfiltered overload alongside a
+     * filtered one — is what makes the mistake unrepeatable.</p>
+     *
+     * <p>Matching is exact on {@code countryCode}; callers normalise to
+     * upper case. Entries whose {@code countryCode} is {@code null} (the
+     * request carried none) belong to no jurisdiction and are returned by
+     * no jurisdiction's query.</p>
+     */
+    List<RegistryEntry> findAnomalies(String countryCode);
 
-    /** Find all entries awaiting Step 7 confirmation. */
-    List<RegistryEntry> findAwaitingConfirmation();
+    /** Find entries within one jurisdiction awaiting Step 7 confirmation. */
+    List<RegistryEntry> findAwaitingConfirmation(String countryCode);
 
     /**
      * Find a registry entry by the public-key fingerprint of the certificate.
@@ -173,15 +188,22 @@ public interface ApprovalRegistry {
      * attestation proves.</p>
      */
     @Data
-    @Builder
+    @Builder(toBuilder = true)
     class RegistryEntry {
         private String verificationId;
         /**
          * Server-issued single-use nonce bound to the verificationId at
          * register time. Echoed back by the FE at confirm time and
-         * compared by {@link ApprovalRegistry#confirm}. Not exposed in
-         * external query responses (controllers strip this field before
-         * returning a registry entry).
+         * compared by {@link ApprovalRegistry#confirm}.
+         *
+         * <p>Single-use: cleared by {@code confirm} once a submitted nonce has
+         * matched, so a replayed confirm cannot succeed.</p>
+         *
+         * <p>Never returned to callers. The field stays serialisable because
+         * {@code AppendOnlyFileApprovalRegistry} persists entries to its
+         * journal and must be able to replay a pending nonce after restart;
+         * {@code VerificationController} therefore strips it per response
+         * instead of the field carrying {@code @JsonIgnore}.</p>
          */
         private String confirmationNonce;
         private boolean compliant;

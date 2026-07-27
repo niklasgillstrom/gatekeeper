@@ -98,9 +98,14 @@ gatekeeper:
       # passes mTLS but doesn't match a role pattern can still reach public
       # endpoints (keys, anchor, health) but nothing protected.
       default-roles: []
+  limits:
+    # See application.yaml for the reasoning. Kept identical in production:
+    # the field limits that determine it are the same.
+    max-http-request-size: ${GATEKEEPER_MAX_REQUEST_SIZE:2MB}
   ratelimit:
     # Token-bucket per mTLS principal (or per IP if unauthenticated).
-    # verify/confirm share one bucket; batch and registry each have their own.
+    # verify/confirm share one bucket; batch, registry, settlement and audit
+    # each have their own.
     # Capacity = burst tokens; refill-seconds = time to refill to full.
     verify:
       capacity: 600            # 10 rps sustained (600 per minute)
@@ -110,6 +115,26 @@ gatekeeper:
       refill-seconds: 60
     registry:
       capacity: 120            # 2 rps — supervisory read access
+    settlement:
+      # POST /api/v1/verify. Sits in the payment path: railgate queries this
+      # per settlement instruction, so the ceiling is set for payment volume,
+      # not supervisory volume. 100 rps sustained. Raise it against the
+      # deployment's actual RIX-INST/TIPS instruction rate before go-live —
+      # a limit that throttles settlement is an availability incident.
+      capacity: 6000
+      refill-seconds: 60
+    audit:
+      # /v1/audit/**. /v1/audit/export serialises the whole chain, so this is
+      # deliberately close to the registry ceiling rather than to verify's.
+      capacity: 120
+      refill-seconds: 60
+    # Reverse proxies whose X-Forwarded-For may be believed. Empty means the
+    # header is ignored and the direct peer is the bucket key. A production
+    # NCA deployment terminating TLS at a load balancer must list that load
+    # balancer here, and must list nothing else.
+    trusted-proxies: ${GATEKEEPER_TRUSTED_PROXIES:}
+    max-tracked-keys: 10000
+    key-idle-seconds: 900
   signing:
     # mode=configured loads the PKCS#12 signing seal; mode=ephemeral uses the
     # reference EphemeralReceiptSigner and logs WARN on every signature.

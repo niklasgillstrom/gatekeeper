@@ -54,6 +54,12 @@ public interface AuditLog {
      * {@code BATCH_VERIFY}, each request inside the batch is appended
      * with its own per-request {@code verificationId} and is therefore
      * also recoverable here.)
+     *
+     * <p>{@code SETTLEMENT_VERIFY} entries are the exception: one issuance
+     * {@code verificationId} accumulates one settlement entry per query
+     * against that certificate, so this method returns only the earliest
+     * of them. Use {@link #findInRange(Instant, Instant)} to enumerate
+     * settlement-time decisions.</p>
      */
     Optional<AuditEntry> findByVerificationId(String verificationId);
 

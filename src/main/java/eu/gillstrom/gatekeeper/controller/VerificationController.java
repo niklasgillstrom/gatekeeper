@@ -6,8 +6,10 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 import eu.gillstrom.gatekeeper.model.*;
 import eu.gillstrom.gatekeeper.service.ApprovalRegistry;
 import eu.gillstrom.gatekeeper.service.VerificationService;
@@ -54,6 +56,25 @@ import java.util.List;
          + "operated by the NCA (in Sweden: Finansinspektionen). "
          + "EBA has supervisory access under Regulation (EU) 1093/2010 Art 17 and 29.")
 public class VerificationController {
+
+    /**
+     * Hard ceiling on the number of attestations in one batch request.
+     *
+     * <p>Each element runs the full verification pipeline — PKIX chain
+     * validation, an audit-log append with an fsync, and a receipt signature
+     * — synchronously on the request thread. There was no ceiling at all
+     * until an independent review pointed it out: a single request could
+     * pin a worker thread for as long as the client cared to make it, which
+     * the per-request rate limit does not bound, because it counts requests
+     * and not work.</p>
+     *
+     * <p>200 is chosen against the actual supervisory use: an EBA Article
+     * 17(4) sweep of one jurisdiction's technical suppliers is tens of
+     * entities, not thousands, and a caller with more can page. At 200 the
+     * worst case is a few seconds of one thread; at 200 000 it is an
+     * outage.</p>
+     */
+    public static final int MAX_BATCH_SIZE = 200;
 
     private final VerificationService verificationService;
     private final ApprovalRegistry approvalRegistry;
@@ -176,12 +197,19 @@ public class VerificationController {
         responses = {
             @ApiResponse(responseCode = "200", description = "Batch verification completed",
                 content = @Content(schema = @Schema(implementation = BatchVerificationResponse.class))),
-            @ApiResponse(responseCode = "400", description = "Invalid request format")
+            @ApiResponse(responseCode = "400", description = "Invalid request format"),
+            @ApiResponse(responseCode = "413", description = "Batch exceeds "
+                    + "MAX_BATCH_SIZE entries; split the submission")
         }
     )
     public ResponseEntity<BatchVerificationResponse> verifyBatch(
             @PathVariable String countryCode,
             @Valid @RequestBody List<VerificationRequest> requests) {
+        if (requests.size() > MAX_BATCH_SIZE) {
+            throw new ResponseStatusException(HttpStatus.CONTENT_TOO_LARGE,
+                    "Batch contains " + requests.size() + " entries; the maximum is "
+                            + MAX_BATCH_SIZE + ". Split the submission.");
+        }
         requests.forEach(r -> r.setCountryCode(countryCode.toUpperCase()));
         BatchVerificationResponse response = verificationService.verifyBatch(requests);
         return ResponseEntity.ok(response);
@@ -202,29 +230,48 @@ public class VerificationController {
 
     @GetMapping("/{countryCode}/registry/anomalies")
     @Operation(
-        summary = "List all anomalies in the registry",
+        summary = "List anomalies in the registry for this jurisdiction",
         description = """
-            Returns all registry entries with anomalous status:
+            Returns the registry entries for {countryCode} with anomalous status:
             certificates issued despite rejection, public key mismatches,
             or confirmations for unknown verification IDs.
             Each anomaly represents a potential active circumvention of
             the supervisory mechanism.""")
     public ResponseEntity<List<ApprovalRegistry.RegistryEntry>> registryAnomalies(
             @PathVariable String countryCode) {
-        return ResponseEntity.ok(approvalRegistry.findAnomalies());
+        return ResponseEntity.ok(withoutNonces(
+                approvalRegistry.findAnomalies(countryCode.toUpperCase())));
     }
 
     @GetMapping("/{countryCode}/registry/awaiting")
     @Operation(
-        summary = "List verifications awaiting Step 7 confirmation",
+        summary = "List verifications awaiting Step 7 confirmation in this jurisdiction",
         description = """
-            Returns all registry entries where the attestation was verified
+            Returns the registry entries for {countryCode} where the attestation was verified
             but no Step 7 confirmation has been received. Entries that remain
             in this state beyond a reasonable period indicate that the
             certificate issuer has not closed the loop.""")
     public ResponseEntity<List<ApprovalRegistry.RegistryEntry>> registryAwaiting(
             @PathVariable String countryCode) {
-        return ResponseEntity.ok(approvalRegistry.findAwaitingConfirmation());
+        return ResponseEntity.ok(withoutNonces(
+                approvalRegistry.findAwaitingConfirmation(countryCode.toUpperCase())));
+    }
+
+    /**
+     * Strips {@code confirmationNonce} from registry entries before they leave
+     * the service.
+     *
+     * <p>Registry queries are supervisory reads, and in the default
+     * configuration (mTLS off) they are reachable without a client
+     * certificate. Serialising the entry verbatim published the live nonce for
+     * every verification still awaiting confirmation, which is precisely the
+     * value an attacker needs to forge a Step-7 confirmation.</p>
+     */
+    private static List<ApprovalRegistry.RegistryEntry> withoutNonces(
+            List<ApprovalRegistry.RegistryEntry> entries) {
+        return entries.stream()
+                .map(e -> e.toBuilder().confirmationNonce(null).build())
+                .toList();
     }
 
     // =========================================================================

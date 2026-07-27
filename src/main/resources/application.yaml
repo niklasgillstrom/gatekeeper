@@ -7,12 +7,60 @@
 
 server:
   port: 8080
+  # Headers only. Spring Boot has no property that bounds a JSON request
+  # body, which is why gatekeeper.limits.max-http-request-size below exists
+  # and is enforced by RequestSizeLimitFilter. 8KB is the Spring default and
+  # is stated here so the two limits are visible together.
+  max-http-request-header-size: 8KB
+  tomcat:
+    # Form-encoded bodies only; the gatekeeper accepts none, so this is a
+    # floor rather than a working limit. Kept small so a mistakenly
+    # form-encoded request is rejected by the container.
+    max-http-form-post-size: 64KB
+    # How much of a rejected request body Tomcat will read and discard
+    # before closing the connection. Bounds the cost of the 413 path.
+    max-swallow-size: 2MB
 
 spring:
   application:
     name: gatekeeper
+  servlet:
+    multipart:
+      # The gatekeeper has no multipart endpoints. Set low rather than left
+      # at the 10MB default so a multipart request cannot be used to get
+      # around the JSON body cap.
+      max-file-size: 1MB
+      max-request-size: 2MB
 
 gatekeeper:
+  limits:
+    # Maximum accepted HTTP request body, enforced by
+    # RequestSizeLimitFilter (Spring Boot has no equivalent property for
+    # non-multipart bodies — see that class's javadoc).
+    #
+    # Sized against the field limits in VerificationRequest: the largest
+    # legitimate request is a batch of attestations, each dominated by an
+    # attestation blob of at most 256 KiB. 2 MB therefore accommodates a
+    # handful of full-size attestations per request, while a caller with
+    # more to submit must page — which VerificationController.MAX_BATCH_SIZE
+    # (200) already requires. Anything above this is malformed or hostile.
+    max-http-request-size: ${GATEKEEPER_MAX_REQUEST_SIZE:2MB}
+  ratelimit:
+    # Comma-separated IPs or CIDRs of reverse proxies whose
+    # X-Forwarded-For header may be believed when deriving a rate-limit
+    # bucket key. EMPTY BY DEFAULT: with no entry the header is ignored
+    # entirely and the direct peer address is the key. Set this only to
+    # addresses you actually operate — a trusted entry lets whatever is
+    # behind it choose its own bucket key.
+    #   trusted-proxies: "10.0.0.0/8,192.168.1.10"
+    trusted-proxies: ${GATEKEEPER_TRUSTED_PROXIES:}
+    # Hard ceiling on how many distinct keys each bucket map may hold, and
+    # how long an unused key is kept. Beyond the ceiling, new keys share one
+    # overflow bucket instead of allocating, so an attacker minting keys
+    # cannot grow memory without bound.
+    max-tracked-keys: 10000
+    key-idle-seconds: 900
+  audit:
   audit:
     # Tamper-evident audit log location (JSON Lines).
     # Each append is fsynced; the file is hash-chained and signed under

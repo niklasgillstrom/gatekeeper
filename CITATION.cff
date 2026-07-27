@@ -10,18 +10,22 @@ abstract: >-
   independently verifiable against pinned vendor trust anchors (Yubico,
   Marvell/Cavium, Microsoft Azure, Google Cloud HSM), maintains a
   hash-chained tamper-evident audit log, and enforces NCA-role-based
-  authorisation. Version 1.2.0 adds a settlement-time signature
+  authorisation. Version 1.2.0 added a settlement-time signature
   verification endpoint (POST /api/v1/verify) for use by settlement-rail
-  enforcement components such as railgate, together with full
-  peer-review, threat-model and supervisory-operations documentation
-  for the triadic system (hsm + gatekeeper + railgate). Supports the
+  enforcement components such as railgate. Version 1.3.0 corrects
+  defects found when the implementation was checked against its documentation: the settlement-time endpoint
+  could not return a positive result because the public-key fingerprint
+  was written and read in different cases, the Step-7 confirmation
+  nonce was published by the registry query endpoints and was
+  replayable, the signature algorithm was chosen by the caller, and
+  cloud-HSM attestation attributes were asserted without being parsed. Supports the
   data-minimised quadruple-triangulation model: only digest, signature,
   and certificate identifiers traverse the supervisor boundary —
   transaction payload content is never exposed to the supervisor.
   Companions: hsm (financial-entity-side HSM attestation verification)
   and railgate (central-bank settlement-rail enforcement).
-version: "1.2.0"
-date-released: "2026-05-01"
+version: "1.3.0"
+date-released: "2026-07-27"
 license: MIT
 repository-code: "https://github.com/niklasgillstrom/gatekeeper"
 authors:

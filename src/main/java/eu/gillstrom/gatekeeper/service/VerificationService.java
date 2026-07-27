@@ -1,5 +1,7 @@
 package eu.gillstrom.gatekeeper.service;
 
+import eu.gillstrom.gatekeeper.util.Fingerprints;
+
 import org.bouncycastle.openssl.PEMParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -446,13 +448,7 @@ public class VerificationService {
 
     private String fingerprint(PublicKey key) {
         try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(key.getEncoded());
-            StringBuilder sb = new StringBuilder();
-            for (byte b : digest) {
-                sb.append(String.format("%02x:", b & 0xff));
-            }
-            return sb.substring(0, sb.length() - 1);
+            return Fingerprints.ofPublicKey(key);
         } catch (Exception e) {
             // SHA-256 is mandatory in every JRE (JCA guarantee), so this branch
             // should be unreachable. If it ever fires we want a loud signal

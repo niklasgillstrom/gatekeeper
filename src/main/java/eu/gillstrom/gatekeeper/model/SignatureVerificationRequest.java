@@ -1,6 +1,7 @@
 package eu.gillstrom.gatekeeper.model;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -41,16 +42,48 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class SignatureVerificationRequest {
 
+    /**
+     * <h2>Field size limits</h2>
+     *
+     * <p>This endpoint sits in the settlement path and, until an independent
+     * review pointed it out, accepted fields of unbounded length: an
+     * attacker could make the gatekeeper hex-decode, base64-decode and
+     * PEM-parse arbitrarily large strings on the payment-critical thread.
+     * The ceilings below are derived from the artefacts themselves:</p>
+     *
+     * <ul>
+     *   <li>A SHA-512 digest is 128 hex characters. 256 leaves room for a
+     *       longer digest without letting a caller stream megabytes into
+     *       {@code HexFormat.parseHex}.</li>
+     *   <li>An RSA-8192 signature is 1024 bytes, or 1368 characters of
+     *       base64; 4096 covers that with a wide margin.</li>
+     *   <li>An X.509 certificate in PEM is 1–3 KB; 16 KiB is generous.</li>
+     *   <li>An X.500 issuer DN is bounded by RFC 5280 practice at a few
+     *       hundred characters; a serial number is a big integer in decimal.</li>
+     * </ul>
+     */
+    public static final int MAX_DIGEST_HEX_LENGTH = 256;
+
+    /** Base64 signature, sized for RSA-8192 with margin. */
+    public static final int MAX_SIGNATURE_B64_LENGTH = 4096;
+
+    /** PEM-encoded X.509 signing certificate. */
+    public static final int MAX_CERT_PEM_LENGTH = 16 * 1024;
+
     @NotBlank
+    @Size(max = 128, message = "certSerial exceeds the maximum accepted length")
     private String certSerial;
 
     @NotBlank
+    @Size(max = 512, message = "issuerDn exceeds the maximum accepted length")
     private String issuerDn;
 
     @NotBlank
+    @Size(max = MAX_DIGEST_HEX_LENGTH, message = "digestHex exceeds the maximum accepted length")
     private String digestHex;
 
     @NotBlank
+    @Size(max = MAX_SIGNATURE_B64_LENGTH, message = "signatureBase64 exceeds the maximum accepted length")
     private String signatureBase64;
 
     /**
@@ -58,6 +91,7 @@ public class SignatureVerificationRequest {
      * for public-key extraction. If absent, gatekeeper looks up the cert
      * stored at Step-7 confirmation.
      */
+    @Size(max = MAX_CERT_PEM_LENGTH, message = "signingCertificatePem exceeds the maximum accepted length")
     private String signingCertificatePem;
 
     /**
@@ -66,6 +100,12 @@ public class SignatureVerificationRequest {
      * signing flow). Other supported values:
      * {@code SHA512_WITH_RSA_PSS}, {@code SHA384_WITH_RSA},
      * {@code SHA256_WITH_RSA}.
+     *
+     * <p>Bounded independently of the whitelist in
+     * {@code SignatureVerificationService}: the whitelist rejects an
+     * unrecognised algorithm, but only after the string has been received
+     * and logged.</p>
      */
+    @Size(max = 64, message = "algorithm exceeds the maximum accepted length")
     private String algorithm;
 }

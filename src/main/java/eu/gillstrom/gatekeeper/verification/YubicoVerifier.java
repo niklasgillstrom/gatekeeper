@@ -218,9 +218,10 @@ public class YubicoVerifier implements HsmAttestationVerifier {
                 }
             }
             if (path.isEmpty()) {
-                // Submitted chain contains only the root — trivially accepted
-                // since it equals the pinned trust anchor.
-                return true;
+                // A chain consisting only of the pinned root proves nothing: the
+                // root is publicly downloadable, and no PKIX validation runs on an
+                // empty path. Matches SecurosysVerifier, which already fails here.
+                return false;
             }
             CertPath certPath = cf.generateCertPath(path);
             Set<TrustAnchor> anchors = Collections.singleton(new TrustAnchor(rootCa, null));

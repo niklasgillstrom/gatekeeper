@@ -1,17 +1,24 @@
 package eu.gillstrom.gatekeeper.controller;
 
+import eu.gillstrom.gatekeeper.util.Fingerprints;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
+import eu.gillstrom.gatekeeper.audit.AppendOnlyFileAuditLog;
+import eu.gillstrom.gatekeeper.audit.MtlsPrincipalResolver;
 import eu.gillstrom.gatekeeper.model.IssuanceConfirmationResponse.RegistryStatus;
 import eu.gillstrom.gatekeeper.model.SignatureVerificationRequest;
 import eu.gillstrom.gatekeeper.service.ApprovalRegistry;
 import eu.gillstrom.gatekeeper.service.SignatureVerificationService;
+import eu.gillstrom.gatekeeper.signing.EphemeralReceiptSigner;
 import eu.gillstrom.gatekeeper.testsupport.TestPki;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.MessageDigest;
 import java.security.PublicKey;
@@ -34,10 +41,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 class SignatureVerificationControllerTest {
 
+    @TempDir
+    Path tempDir;
+
     private MockMvc mockMvc;
     private ObjectMapper json;
 
     private FakeApprovalRegistry registry;
+    private AppendOnlyFileAuditLog auditLog;
     private KeyPair signingKeyPair;
     private X509Certificate signingCert;
     private String signingCertPem;
@@ -46,7 +57,11 @@ class SignatureVerificationControllerTest {
     @BeforeEach
     void setUp() throws Exception {
         registry = new FakeApprovalRegistry();
-        SignatureVerificationService service = new SignatureVerificationService(registry);
+        auditLog = new AppendOnlyFileAuditLog(
+                tempDir.resolve("audit.jsonl").toString(), new EphemeralReceiptSigner(2048));
+        auditLog.initialise();
+        SignatureVerificationService service =
+                new SignatureVerificationService(registry, auditLog, new MtlsPrincipalResolver());
         SignatureVerificationController controller = new SignatureVerificationController(service);
 
         mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
@@ -143,6 +158,28 @@ class SignatureVerificationControllerTest {
                 .andExpect(jsonPath("$.compliant").value(true));
     }
 
+    @Test
+    void verifyEndpointAppendsAnAuditEntryForEverySettlementQuery() throws Exception {
+        registry.put(publicKeyFingerprint, ApprovalRegistry.RegistryEntry.builder()
+                .verificationId("VID-AUDIT")
+                .compliant(true)
+                .status(RegistryStatus.VERIFIED_AND_ISSUED)
+                .publicKeyFingerprint(publicKeyFingerprint)
+                .build());
+
+        org.assertj.core.api.Assertions.assertThat(auditLog.size()).isZero();
+
+        mockMvc.perform(post("/api/v1/verify")
+                        .contentType("application/json")
+                        .content(json.writeValueAsString(signedRequest("payload-audit"))))
+                .andExpect(status().isOk());
+
+        org.assertj.core.api.Assertions.assertThat(auditLog.size()).isEqualTo(1);
+        org.assertj.core.api.Assertions.assertThat(auditLog.head().orElseThrow().operation())
+                .isEqualTo(SignatureVerificationService.AUDIT_OPERATION);
+        org.assertj.core.api.Assertions.assertThat(auditLog.verifyChainIntegrity()).isTrue();
+    }
+
     // ---------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------
@@ -165,14 +202,14 @@ class SignatureVerificationControllerTest {
                 .build();
     }
 
-    private static String computeFingerprint(PublicKey publicKey) throws Exception {
-        byte[] hash = MessageDigest.getInstance("SHA-256").digest(publicKey.getEncoded());
-        StringBuilder sb = new StringBuilder(hash.length * 3);
-        for (int i = 0; i < hash.length; i++) {
-            if (i > 0) sb.append(':');
-            sb.append(String.format("%02X", hash[i] & 0xFF));
-        }
-        return sb.toString();
+    /**
+     * Delegates to production code on purpose. If this test computed the
+     * fingerprint itself it could encode a format the production writer never
+     * produces, which is exactly how the uppercase/lowercase mismatch stayed
+     * hidden.
+     */
+    private static String computeFingerprint(PublicKey publicKey) {
+        return Fingerprints.ofPublicKey(publicKey);
     }
 
     /**
@@ -216,12 +253,12 @@ class SignatureVerificationControllerTest {
         }
 
         @Override
-        public java.util.List<RegistryEntry> findAnomalies() {
+        public java.util.List<RegistryEntry> findAnomalies(String countryCode) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public java.util.List<RegistryEntry> findAwaitingConfirmation() {
+        public java.util.List<RegistryEntry> findAwaitingConfirmation(String countryCode) {
             throw new UnsupportedOperationException();
         }
 

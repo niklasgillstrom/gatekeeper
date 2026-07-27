@@ -247,6 +247,10 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
                                    boolean issued,
                                    String actualPublicKeyFingerprint,
                                    boolean publicKeyMatch) {
+        // The nonce has now been spent. Clearing it makes confirm single-use:
+        // a replayed request finds a null expectedNonce and is rejected.
+        entry.setConfirmationNonce(null);
+
         entry.setConfirmationTimestamp(Instant.now().toString());
         entry.setCertificateReceived(issued);
 
@@ -299,22 +303,34 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
     @Override
     public List<RegistryEntry> findByCountry(String countryCode) {
         return entries.values().stream()
-                .filter(e -> countryCode.equals(e.getCountryCode()))
+                .filter(e -> inCountry(e, countryCode))
                 .collect(Collectors.toList());
     }
 
     @Override
-    public List<RegistryEntry> findAnomalies() {
+    public List<RegistryEntry> findAnomalies(String countryCode) {
         return entries.values().stream()
+                .filter(e -> inCountry(e, countryCode))
                 .filter(e -> e.getStatus() != null && e.getStatus().name().startsWith("ANOMALY"))
                 .collect(Collectors.toList());
     }
 
     @Override
-    public List<RegistryEntry> findAwaitingConfirmation() {
+    public List<RegistryEntry> findAwaitingConfirmation(String countryCode) {
         return entries.values().stream()
+                .filter(e -> inCountry(e, countryCode))
                 .filter(e -> e.getStatus() == null)
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Jurisdiction predicate shared by every country-scoped query. Mirrors
+     * {@link InMemoryApprovalRegistry} exactly — the two implementations
+     * answering the same supervisory question differently would be a defect
+     * in itself. A {@code null} argument matches nothing.
+     */
+    private static boolean inCountry(RegistryEntry entry, String countryCode) {
+        return countryCode != null && countryCode.equals(entry.getCountryCode());
     }
 
     @Override

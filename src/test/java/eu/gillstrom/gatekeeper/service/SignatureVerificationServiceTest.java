@@ -1,13 +1,22 @@
 package eu.gillstrom.gatekeeper.service;
 
+import eu.gillstrom.gatekeeper.util.Fingerprints;
+
+import eu.gillstrom.gatekeeper.audit.AppendOnlyFileAuditLog;
+import eu.gillstrom.gatekeeper.audit.AuditEntry;
+import eu.gillstrom.gatekeeper.audit.MtlsPrincipalResolver;
 import eu.gillstrom.gatekeeper.model.IssuanceConfirmationResponse.RegistryStatus;
 import eu.gillstrom.gatekeeper.model.SignatureVerificationRequest;
 import eu.gillstrom.gatekeeper.model.SignatureVerificationResponse;
+import eu.gillstrom.gatekeeper.signing.EphemeralReceiptSigner;
 import eu.gillstrom.gatekeeper.testsupport.TestPki;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.MessageDigest;
 import java.security.PublicKey;
@@ -15,6 +24,7 @@ import java.security.Signature;
 import java.security.cert.X509Certificate;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -36,8 +46,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class SignatureVerificationServiceTest {
 
+    @TempDir
+    Path tempDir;
+
     private FakeApprovalRegistry registry;
     private SignatureVerificationService service;
+    private AppendOnlyFileAuditLog auditLog;
+    private Path auditPath;
 
     private KeyPair signingKeyPair;
     private X509Certificate signingCert;
@@ -47,7 +62,13 @@ class SignatureVerificationServiceTest {
     @BeforeEach
     void setUp() throws Exception {
         registry = new FakeApprovalRegistry();
-        service = new SignatureVerificationService(registry);
+        // A real audit log on a temp path, not a stub: the settlement-time
+        // audit entry is a claim about what actually lands in the chain, and
+        // a stub could not falsify it.
+        auditPath = tempDir.resolve("audit.jsonl");
+        auditLog = new AppendOnlyFileAuditLog(auditPath.toString(), new EphemeralReceiptSigner(2048));
+        auditLog.initialise();
+        service = new SignatureVerificationService(registry, auditLog, new MtlsPrincipalResolver());
 
         signingKeyPair = TestPki.newRsaKeyPair(2048);
         signingCert = TestPki.selfSignedCa(signingKeyPair, "Test Signing Cert");
@@ -178,6 +199,77 @@ class SignatureVerificationServiceTest {
     }
 
     // ---------------------------------------------------------------------
+    // Audit trail — settlement-time decisions must be in the chain
+    // ---------------------------------------------------------------------
+
+    @Test
+    void writesOneAuditEntryPerSettlementVerification() throws Exception {
+        registry.put(publicKeyFingerprint,
+                buildEntry("VID-AUDIT", true, RegistryStatus.VERIFIED_AND_ISSUED));
+
+        service.verify(signedRequest("payload-I"));
+        service.verify(signedRequest("payload-J"));
+
+        assertThat(auditLog.size()).isEqualTo(2);
+        assertThat(auditLog.verifyChainIntegrity()).isTrue();
+
+        List<AuditEntry> entries = auditLog.findInRange(
+                java.time.Instant.EPOCH, java.time.Instant.now().plusSeconds(60));
+        assertThat(entries).hasSize(2);
+        for (AuditEntry entry : entries) {
+            assertThat(entry.operation()).isEqualTo(SignatureVerificationService.AUDIT_OPERATION);
+            assertThat(entry.verificationId()).isEqualTo("VID-AUDIT");
+            assertThat(entry.compliant()).isTrue();
+            assertThat(entry.requestDigestBase64()).isNotBlank();
+            assertThat(entry.receiptDigestBase64()).isNotBlank();
+        }
+        // Two distinct payloads must produce two distinct request digests,
+        // otherwise the digest is not a witness to anything.
+        assertThat(entries.get(0).requestDigestBase64())
+                .isNotEqualTo(entries.get(1).requestDigestBase64());
+    }
+
+    @Test
+    void auditEntryRecordsTheDenialWhenSettlementIsRefused() throws Exception {
+        // No registry entry for this key: signature verifies, compliance does not.
+        service.verify(signedRequest("payload-K"));
+
+        assertThat(auditLog.size()).isEqualTo(1);
+        AuditEntry entry = auditLog.head().orElseThrow();
+        assertThat(entry.operation()).isEqualTo(SignatureVerificationService.AUDIT_OPERATION);
+        assertThat(entry.compliant()).isFalse();
+        assertThat(entry.verificationId())
+                .isEqualTo(SignatureVerificationService.NO_REGISTRY_MATCH);
+    }
+
+    @Test
+    void auditEntryCarriesNoRequestContentBeyondDigests() throws Exception {
+        registry.put(publicKeyFingerprint,
+                buildEntry("VID-DM", true, RegistryStatus.VERIFIED_AND_ISSUED));
+
+        SignatureVerificationRequest request = signedRequest("payload-L");
+        service.verify(request);
+
+        String onDisk = Files.readString(auditPath, StandardCharsets.UTF_8);
+        assertThat(onDisk).isNotBlank();
+        // The transaction digest, the signature and the certificate are the
+        // request's substance. None of them may be written verbatim — only
+        // the SHA-256 over the canonical form. (certSerial is not asserted
+        // on: TestPki issues single-digit serials, which occur incidentally
+        // in any line containing a timestamp.)
+        assertThat(onDisk).doesNotContain(request.getDigestHex());
+        assertThat(onDisk).doesNotContain(request.getSignatureBase64());
+        // A single base64 line from the middle of the certificate — a
+        // whole-PEM comparison would pass trivially because of newline
+        // escaping in the JSON-Lines form.
+        String certBodyLine = request.getSigningCertificatePem().lines()
+                .filter(l -> l.length() > 32 && !l.startsWith("-----"))
+                .findFirst()
+                .orElseThrow();
+        assertThat(onDisk).doesNotContain(certBodyLine);
+    }
+
+    // ---------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------
 
@@ -206,14 +298,14 @@ class SignatureVerificationServiceTest {
                 .build();
     }
 
-    private static String computeFingerprint(PublicKey publicKey) throws Exception {
-        byte[] hash = MessageDigest.getInstance("SHA-256").digest(publicKey.getEncoded());
-        StringBuilder sb = new StringBuilder(hash.length * 3);
-        for (int i = 0; i < hash.length; i++) {
-            if (i > 0) sb.append(':');
-            sb.append(String.format("%02X", hash[i] & 0xFF));
-        }
-        return sb.toString();
+    /**
+     * Delegates to production code on purpose. If this test computed the
+     * fingerprint itself it could encode a format the production writer never
+     * produces, which is exactly how the uppercase/lowercase mismatch stayed
+     * hidden.
+     */
+    private static String computeFingerprint(PublicKey publicKey) {
+        return Fingerprints.ofPublicKey(publicKey);
     }
 
     private static ApprovalRegistry.RegistryEntry buildEntry(
@@ -275,12 +367,12 @@ class SignatureVerificationServiceTest {
         }
 
         @Override
-        public java.util.List<RegistryEntry> findAnomalies() {
+        public java.util.List<RegistryEntry> findAnomalies(String countryCode) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public java.util.List<RegistryEntry> findAwaitingConfirmation() {
+        public java.util.List<RegistryEntry> findAwaitingConfirmation(String countryCode) {
             throw new UnsupportedOperationException();
         }
 

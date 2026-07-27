@@ -577,7 +577,7 @@ Companion endpoint to the issuance-time attestation flow. Whereas the `/v1/attes
 
 The intended caller is a settlement-rail enforcement layer such as **railgate**, which receives pacs.008 messages at the central-bank settlement rail (RIX-INST in Sweden, TIPS in the Eurosystem, FedNow in the US) and queries this endpoint to determine whether to allow or default-deny the settlement.
 
-**Data minimisation.** This endpoint never receives or stores transaction payload content. Only cryptographic artefacts (digest, signature, certificate) traverse the boundary. The supervisor never sees transaction amounts, sender/receiver detail, or business message content. SHA-512 collision resistance ensures the digest uniquely binds the signature to the exact transaction performed. This satisfies GDPR Article 5(1)(c) (data minimisation) and the proportionality requirement implicit in DORA Article 32 supervisory data processing.
+**Data minimisation.** This endpoint never receives or stores transaction payload content. Only cryptographic artefacts (digest, signature, certificate) traverse the boundary. The supervisor never sees transaction amounts, sender/receiver detail, or business message content. SHA-512 collision resistance binds the signature to the payload the digest was taken over; binding it to the settled message is a property of the caller, not of this endpoint (see `[RG]/README.md`). This satisfies GDPR Article 5(1)(c) (data minimisation) and the proportionality requirement implicit in DORA Article 32 supervisory data processing.
 
 **Request:**
 

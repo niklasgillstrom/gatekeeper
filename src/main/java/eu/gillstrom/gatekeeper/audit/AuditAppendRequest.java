@@ -12,11 +12,17 @@ import java.util.Objects;
  *       the mTLS client certificate. The value {@code "anonymous"} is used
  *       when the open (non-mTLS) reference filter chain is in use.</li>
  *   <li>{@code operation} — one of {@code VERIFY}, {@code CONFIRM},
- *       {@code BATCH_VERIFY}. Used by supervisory tooling to filter the
- *       audit trail by step in the gatekeeper flow.</li>
+ *       {@code BATCH_VERIFY} (issuance-time, {@code VerificationService})
+ *       or {@code SETTLEMENT_VERIFY} (settlement-time,
+ *       {@code SignatureVerificationService}). Used by supervisory tooling
+ *       to filter the audit trail by step in the gatekeeper flow.</li>
  *   <li>{@code verificationId} — the gatekeeper-internal UUID that ties this
  *       audit entry to a row in the {@link
- *       eu.gillstrom.gatekeeper.service.ApprovalRegistry}.</li>
+ *       eu.gillstrom.gatekeeper.service.ApprovalRegistry}. For
+ *       {@code SETTLEMENT_VERIFY} the same UUID recurs once per settlement
+ *       query against that certificate, and the sentinel
+ *       {@code NO-REGISTRY-MATCH} is used when the presented certificate has
+ *       no registry row at all.</li>
  *   <li>{@code requestDigestBase64} — Base64-encoded SHA-256 digest of the
  *       canonical request bytes. Allows a supervisor to prove what was
  *       submitted without storing the full payload (the receipt itself is

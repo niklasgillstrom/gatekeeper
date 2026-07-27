@@ -1,6 +1,7 @@
 package eu.gillstrom.gatekeeper.model;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import lombok.Data;
 
 /**
@@ -20,10 +21,21 @@ import lombok.Data;
 public class IssuanceConfirmation {
 
     /**
+     * Size limits, added after an independent review found none on any
+     * request model. A verificationId is a UUID (36 characters), the nonce
+     * is 32 random bytes in unpadded base64url (43 characters), and a PEM
+     * certificate is 1–3 KB — every ceiling here is an order of magnitude
+     * above the artefact it bounds, so it can only be tripped by a request
+     * that is malformed or hostile.
+     */
+    public static final int MAX_CERT_PEM_LENGTH = 16 * 1024;
+
+    /**
      * The EBA verification ID from the signed receipt (Step 5).
      * Links this confirmation to the original verification request.
      */
     @NotBlank(message = "Verification ID is required")
+    @Size(max = 64, message = "verificationId exceeds the maximum accepted length")
     private String verificationId;
 
     /**
@@ -38,6 +50,7 @@ public class IssuanceConfirmation {
      * verificationId out of band.
      */
     @NotBlank(message = "Confirmation nonce is required")
+    @Size(max = 128, message = "confirmationNonce exceeds the maximum accepted length")
     private String confirmationNonce;
 
     /**
@@ -51,27 +64,32 @@ public class IssuanceConfirmation {
      * attestation evidence approved in Step 3.
      * Null if not issued.
      */
+    @Size(max = MAX_CERT_PEM_LENGTH, message = "signingCertificatePem exceeds the maximum accepted length")
     private String signingCertificatePem;
 
     /**
      * ISO 8601 timestamp of the issuance or refusal.
      */
     @NotBlank(message = "Timestamp is required")
+    @Size(max = 64, message = "timestamp exceeds the maximum accepted length")
     private String timestamp;
 
     /**
      * If not issued: reason for non-issuance.
      * E.g. "NON-COMPLIANT attestation", "Technical supplier withdrew request"
      */
+    @Size(max = 1024, message = "nonIssuanceReason exceeds the maximum accepted length")
     private String nonIssuanceReason;
 
     /**
      * The Swish number associated with this certificate.
      */
+    @Size(max = 32, message = "swishNumber exceeds the maximum accepted length")
     private String swishNumber;
 
     /**
      * Organisation number of the corporate customer.
      */
+    @Size(max = 32, message = "organisationNumber exceeds the maximum accepted length")
     private String organisationNumber;
 }

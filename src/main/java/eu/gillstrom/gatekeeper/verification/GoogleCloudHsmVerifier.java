@@ -272,7 +272,10 @@ public class GoogleCloudHsmVerifier implements HsmAttestationVerifier {
                 }
             }
             if (path.isEmpty()) {
-                return true;
+                // A chain consisting only of the pinned root proves nothing: the
+                // root is publicly downloadable, and no PKIX validation runs on an
+                // empty path. Matches SecurosysVerifier, which already fails here.
+                return false;
             }
             CertPath certPath = cf.generateCertPath(path);
             Set<TrustAnchor> anchors = Collections.singleton(new TrustAnchor(attestationTrustAnchor, null));
@@ -324,6 +327,7 @@ public class GoogleCloudHsmVerifier implements HsmAttestationVerifier {
         try {
             // Parse TLV-encoded attributes (Marvell format)
             int pos = 0;
+            boolean extractableSeen = false;
             while (pos + 4 < attestation.length) {
                 int tag = ((attestation[pos] & 0xFF) << 8) | (attestation[pos + 1] & 0xFF);
                 int len = ((attestation[pos + 2] & 0xFF) << 8) | (attestation[pos + 3] & 0xFF);
@@ -342,14 +346,26 @@ public class GoogleCloudHsmVerifier implements HsmAttestationVerifier {
                             result.setKeySize(((value[0] & 0xFF) << 8) | (value[1] & 0xFF));
                         }
                     }
-                    case TAG_EXTRACTABLE -> result.setExtractable(value.length > 0 && value[0] != 0);
+                    case TAG_EXTRACTABLE -> {
+                        result.setExtractable(value.length > 0 && value[0] != 0);
+                        extractableSeen = true;
+                    }
                 }
 
                 pos += len;
             }
 
-            // Google Cloud HSM keys are non-extractable by design
-            if (!result.isExtractable()) {
+            // Absence of the extractability tag is not evidence of
+            // non-extractability. Without it the field default (false) would be
+            // mistaken for a verified attribute and keyOrigin would be set to
+            // "generated" on no evidence at all, satisfying two compliance
+            // conjuncts that were never checked. Fail closed instead.
+            if (!extractableSeen) {
+                result.setKeyOrigin("unverified");
+                result.addError("GOOGLE_ATTRIBUTES_UNVERIFIED: attestation carries no "
+                        + "extractability attribute (tag 0x0162) - key origin and "
+                        + "exportability could not be established");
+            } else if (!result.isExtractable()) {
                 result.setKeyOrigin("generated");
             }
 
