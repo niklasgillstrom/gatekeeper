@@ -49,12 +49,10 @@ import java.util.stream.Collectors;
  *
  * <ul>
  *   <li><strong>{@code REGISTER}</strong> — emitted by
- *       {@link #register(String, boolean, String, String, String, String, String, String)}.
- *       Carries the full initial entry payload.</li>
+ *       {@code register(...)}. Carries the full initial entry payload.</li>
  *   <li><strong>{@code CONFIRM}</strong> — emitted by
- *       {@link #confirm(String, boolean, String, boolean)}. Carries the
- *       confirmation outcome plus the {@code verificationId} key needed
- *       to apply it.</li>
+ *       {@code confirm(...)}. Carries the confirmation outcome plus the
+ *       {@code verificationId} key needed to apply it.</li>
  * </ul>
  *
  * <p>On startup the journal is replayed in order: each {@code REGISTER}
@@ -139,6 +137,10 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
                                 op.path("issued").asBoolean(),
                                 op.path("actualPublicKeyFingerprint").asText(null),
                                 op.path("publicKeyMatch").asBoolean());
+                        // A journalled CONFIRM is proof the nonce was spent,
+                        // so replay must consume it too — otherwise a restart
+                        // would make an already-used nonce valid again.
+                        existing.setConfirmationNonce(null);
                         confirmCount++;
                     } else {
                         log.warn("Replay: unknown op type {} — skipping line", opType);
@@ -176,7 +178,8 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
                                   String supplierName,
                                   String hsmVendor,
                                   String hsmModel,
-                                  String countryCode) {
+                                  String countryCode,
+                                  String verificationPrincipal) {
         RegistryEntry entry = RegistryEntry.builder()
                 .verificationId(verificationId)
                 .confirmationNonce(confirmationNonce)
@@ -187,6 +190,7 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
                 .hsmVendor(hsmVendor)
                 .hsmModel(hsmModel)
                 .countryCode(countryCode)
+                .verificationPrincipal(verificationPrincipal)
                 .verificationTimestamp(Instant.now().toString())
                 .status(compliant ? RegistryStatus.VERIFIED_AND_ISSUED : RegistryStatus.REJECTED_NOT_ISSUED)
                 .certificateReceived(false)
@@ -205,52 +209,82 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
         return entry;
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>The whole operation runs under {@link #writeLock}, not just the
+     * journal append. The nonce check and the nonce consumption are one
+     * atomic step: with them apart, two concurrent confirmations carrying
+     * the same nonce both read a non-null value and both succeed, which
+     * defeats the single-use property. {@code appendOp} re-enters the same
+     * lock.</p>
+     *
+     * <p>The in-memory nonce is cleared only <em>after</em> the journal
+     * append has returned. Clearing it first meant that an I/O failure on
+     * the journal burned the nonce: the transition was never recorded, the
+     * caller got a 5xx and was told to retry, and the retry then failed the
+     * nonce check against a null expected value — the FE could never close
+     * the loop for that verificationId again.</p>
+     */
     @Override
     public Optional<RegistryEntry> confirm(String verificationId,
                                            String submittedNonce,
                                            boolean issued,
                                            String actualPublicKeyFingerprint,
                                            boolean publicKeyMatch) {
-        RegistryEntry entry = entries.get(verificationId);
-        if (entry == null) {
-            return Optional.empty();
+        writeLock.lock();
+        try {
+            RegistryEntry entry = entries.get(verificationId);
+            if (entry == null) {
+                return Optional.empty();
+            }
+
+            // Constant-time nonce comparison. Mismatch is a Step-7 replay
+            // attempt and must NOT be journalled (no state transition occurs).
+            String expectedNonce = entry.getConfirmationNonce();
+            if (expectedNonce == null
+                    || submittedNonce == null
+                    || !java.security.MessageDigest.isEqual(
+                            expectedNonce.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                            submittedNonce.getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
+                log.warn("Nonce mismatch on confirm for verificationId={} — possible Step-7 replay attempt",
+                        verificationId);
+                throw new NonceMismatchException(verificationId);
+            }
+
+            // Apply the state transition to the in-memory entry first; then
+            // journal it. If journalling fails we let the exception propagate
+            // and the caller surfaces it as a 5xx so the FE retries — with
+            // the nonce still intact, because we have not cleared it yet.
+            applyConfirmation(entry, issued, actualPublicKeyFingerprint, publicKeyMatch);
+            appendOp(OP_CONFIRM, verificationId, mapper -> mapper
+                    .createObjectNode()
+                    .put("op", OP_CONFIRM)
+                    .put("verificationId", verificationId)
+                    .put("issued", issued)
+                    .put("actualPublicKeyFingerprint", actualPublicKeyFingerprint)
+                    .put("publicKeyMatch", publicKeyMatch));
+
+            // Durable now. The nonce is spent: a replay finds null and is
+            // rejected by the check above.
+            entry.setConfirmationNonce(null);
+
+            return Optional.of(entry);
+        } finally {
+            writeLock.unlock();
         }
-
-        // Constant-time nonce comparison. Mismatch is a Step-7 replay attempt
-        // and must NOT be journalled (no state transition occurs).
-        String expectedNonce = entry.getConfirmationNonce();
-        if (expectedNonce == null
-                || submittedNonce == null
-                || !java.security.MessageDigest.isEqual(
-                        expectedNonce.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                        submittedNonce.getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
-            log.warn("Nonce mismatch on confirm for verificationId={} — possible Step-7 replay attempt", verificationId);
-            throw new NonceMismatchException(verificationId);
-        }
-
-        // Apply the state transition to the in-memory entry first; then
-        // journal it. If journalling fails we let the exception propagate
-        // and the caller surfaces it as a 5xx so the FE retries.
-        applyConfirmation(entry, issued, actualPublicKeyFingerprint, publicKeyMatch);
-        appendOp(OP_CONFIRM, verificationId, mapper -> mapper
-                .createObjectNode()
-                .put("op", OP_CONFIRM)
-                .put("verificationId", verificationId)
-                .put("issued", issued)
-                .put("actualPublicKeyFingerprint", actualPublicKeyFingerprint)
-                .put("publicKeyMatch", publicKeyMatch));
-
-        return Optional.of(entry);
     }
 
+    /**
+     * Apply a confirmation outcome to an entry. Does not touch the nonce —
+     * see {@link #confirm} for why consumption is ordered after the journal
+     * append, and {@link #initialise()} for the replay path, which clears
+     * the nonce because the journal proves the confirmation happened.
+     */
     private void applyConfirmation(RegistryEntry entry,
                                    boolean issued,
                                    String actualPublicKeyFingerprint,
                                    boolean publicKeyMatch) {
-        // The nonce has now been spent. Clearing it makes confirm single-use:
-        // a replayed request finds a null expectedNonce and is rejected.
-        entry.setConfirmationNonce(null);
-
         entry.setConfirmationTimestamp(Instant.now().toString());
         entry.setCertificateReceived(issued);
 

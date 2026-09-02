@@ -40,16 +40,17 @@ A peer reviewer who reduces this to "the gatekeeper does not technically prevent
 
 ### 2.1 Monitor audit-log integrity
 
-The gatekeeper exposes `GET /v1/gatekeeper/health`. The response carries a JSON body with three load-bearing fields:
+The gatekeeper exposes `GET /v1/gatekeeper/health`. From release 1.4.0 the endpoint requires the `SUPERVISOR` role, so the monitoring pipeline needs a client certificate that maps to it — it is not an anonymous liveness probe (`/v1/attestation/health` is). The response carries a JSON body with four load-bearing fields:
 
 - `auditLogReadable` — `true` iff the gatekeeper can read the audit-log file without I/O error.
 - `chainIntact` — `true` iff `AuditLog.verifyChainIntegrity()` walked the entire chain successfully (every entry's `prevEntryHashHex` matched the previous entry's `thisEntryHashHex`, and every `thisEntryHashHex` matched the SHA-256 over the canonical bytes).
-- `signingMode` — `configured` for production (real seal certificate from a PKCS#12 keystore) or `ephemeral` for reference deployments (throwaway in-process key, marked `CN=REFERENCE-EPHEMERAL`).
+- `chainCheckedAt` — when that walk ran. The result is cached and recomputed at most once per `gatekeeper.audit.integrity-check-interval-seconds` (default 300), because the walk is O(chain length) with one signature verification per entry. Polling faster than the interval returns the same answer with the same timestamp.
+- `mode` — `configured` for production (real seal certificate from a PKCS#12 keystore) or `ephemeral` for reference deployments (throwaway in-process key, marked `CN=REFERENCE-EPHEMERAL`).
 
 Operational requirements:
 
-- A monitoring pipeline polls `/v1/gatekeeper/health` at least every five minutes. The pipeline raises an alert if `chainIntact=false` or `auditLogReadable=false`.
-- If `signingMode=ephemeral` is observed in a production environment, the pipeline raises a P1 alert immediately. A real production deployment must run with `gatekeeper.signing.mode=configured`.
+- A monitoring pipeline polls `/v1/gatekeeper/health` at least every five minutes. The pipeline raises an alert if `chainIntact=false` or `auditLogReadable=false`, and also if `chainCheckedAt` stops advancing — a frozen timestamp means the integrity check is no longer completing. Set `gatekeeper.audit.integrity-check-interval-seconds` at or below the polling interval so every poll can observe a fresh result.
+- If `mode=ephemeral` is observed in a production environment, the pipeline raises a P1 alert immediately. A real production deployment must run with `gatekeeper.signing.mode=configured`.
 - The alerting destination is whichever incident-response queue the NCA's ICT operations team uses. Finansinspektionen's deployments route to the same on-call queue that handles other regulated supervisory APIs.
 
 ### 2.2 Publish the chain anchor

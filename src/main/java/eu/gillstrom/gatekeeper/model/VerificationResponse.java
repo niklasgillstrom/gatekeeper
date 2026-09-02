@@ -52,10 +52,13 @@ public class VerificationResponse {
      *       matching confirm call (or until a deployment-configurable
      *       TTL elapses). After consumption, replay of the same nonce is
      *       rejected.</li>
-     *   <li>Not included in the canonical receipt-signing bytes — the
-     *       nonce is operational anti-replay, not a decision-relevant
-     *       field. The receipt remains independently verifiable without
-     *       the nonce.</li>
+     *   <li>Included in the canonical receipt-signing bytes as of
+     *       canonical version {@code v2} (see {@code ReceiptCanonicalizer}).
+     *       It was excluded under {@code v1} on the reasoning that it was
+     *       operational rather than decision-relevant, which left it
+     *       rewritable in transit without invalidating the signature —
+     *       an intermediary could substitute a nonce of its own choosing
+     *       and the FE could not tell.</li>
      * </ul>
      */
     private String confirmationNonce;

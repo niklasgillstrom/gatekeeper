@@ -232,7 +232,7 @@ class SignatureVerificationControllerTest {
         @Override
         public RegistryEntry register(String verificationId, String confirmationNonce, boolean compliant,
                 String publicKeyFingerprint, String supplierIdentifier, String supplierName,
-                String hsmVendor, String hsmModel, String countryCode) {
+                String hsmVendor, String hsmModel, String countryCode, String verificationPrincipal) {
             throw new UnsupportedOperationException();
         }
 

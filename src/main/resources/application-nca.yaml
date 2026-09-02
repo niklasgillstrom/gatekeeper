@@ -39,6 +39,10 @@ gatekeeper:
     # offline export tooling.
     path: /var/lib/gatekeeper/audit-log.jsonl
     retention-years: 5
+    # See application.yaml. Kept at the default in production: the chain
+    # grows over the 5-year retention window, so the per-request walk this
+    # replaces would get slower every day the deployment runs.
+    integrity-check-interval-seconds: ${GATEKEEPER_INTEGRITY_CHECK_INTERVAL_SECONDS:300}
   registry:
     # mode=file activates AppendOnlyFileApprovalRegistry — restart-safe,
     # journal-backed, fsynced per write. mode=in-memory falls back to the
@@ -157,10 +161,17 @@ swish:
     # production adapter names will be added when wired
     mode: fail-closed
 
+# OpenAPI document and Swagger UI are off in every non-dev profile. Neither has
+# a run-time function in this service, and the UI is a third-party JavaScript
+# application (swagger-ui, DOMPurify) whose vulnerabilities would otherwise be
+# part of the deployed surface. Enable locally with --spring.profiles.active=dev
+# (application-dev.yaml).
 springdoc:
   api-docs:
-    path: /api-docs
+    enabled: false
+    path: /v3/api-docs
   swagger-ui:
+    enabled: false
     path: /swagger-ui.html
     operationsSorter: method
 

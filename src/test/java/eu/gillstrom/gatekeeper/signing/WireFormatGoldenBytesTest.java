@@ -55,7 +55,7 @@ class WireFormatGoldenBytesTest {
      * an identical literal — keep them in lockstep.
      */
     private static final String EXPECTED_GOLDEN =
-            "v1|test-uuid|true|2026-04-27T00:00:00Z|aa:bb|RSA|YUBICO|YubiHSM 2|"
+            "v2|test-uuid|test-nonce|true|2026-04-27T00:00:00Z|aa:bb|RSA|YUBICO|YubiHSM 2|"
             + "20783176|5569743098|Test|signing|SE|"
             + "true|true|true|true|"
             + "true|true|true|true|true|true";
@@ -63,6 +63,11 @@ class WireFormatGoldenBytesTest {
     private static VerificationResponse fixedReceipt() {
         return VerificationResponse.builder()
                 .verificationId("test-uuid")
+                // Fixed nonce, not a generated one: the position of this
+                // field in the canonical form is exactly what the golden
+                // literal has to lock, and a receipt whose nonce is empty
+                // would not lock it.
+                .confirmationNonce("test-nonce")
                 .compliant(true)
                 .verificationTimestamp(Instant.parse("2026-04-27T00:00:00Z"))
                 .publicKeyFingerprint("aa:bb")
@@ -164,21 +169,24 @@ class WireFormatGoldenBytesTest {
 
         String s = new String(ReceiptCanonicalizer.canonicalize(r), StandardCharsets.UTF_8);
 
-        // verificationId set, compliant=false, verificationTimestamp null -> empty.
+        // verificationId set, confirmationNonce null -> empty,
+        // compliant=false, verificationTimestamp null -> empty.
         assertThat(s)
-                .as("null verificationTimestamp renders as empty between two pipes")
-                .startsWith("v1|v1-uuid|false||");
+                .as("null confirmationNonce and null verificationTimestamp both render as empty")
+                .startsWith("v2|v1-uuid||false||");
 
-        // After v1, verificationId, compliant, and the empty timestamp field,
-        // 19 further fields (9 string fields + 4 keyProperty bits + 6 DORA
-        // article bits) are all empty. Total 23 canonical cells, 22 separators.
-        // We assert the full deterministic output rather than just a prefix so
-        // a future change that accidentally inserts a non-empty default is caught.
-        String expectedAllNull = "v1|v1-uuid|false" + "|".repeat(20);
+        // After v2, verificationId, the empty nonce, compliant, and the empty
+        // timestamp field, 19 further fields (9 string fields + 4 keyProperty
+        // bits + 6 DORA article bits) are all empty. Total 24 canonical cells,
+        // 23 separators. We assert the full deterministic output rather than
+        // just a prefix so a future change that accidentally inserts a
+        // non-empty default is caught.
+        String expectedAllNull = "v2|v1-uuid||false" + "|".repeat(20);
         assertThat(s)
                 .as("entire canonical form when only verificationId and compliant are set "
-                    + "must be the version marker, the verificationId, the boolean, an "
-                    + "empty timestamp, and 19 further empty fields (22 separators total)")
+                    + "must be the version marker, the verificationId, an empty nonce, the "
+                    + "boolean, an empty timestamp, and 19 further empty fields (23 "
+                    + "separators total)")
                 .isEqualTo(expectedAllNull);
     }
 }

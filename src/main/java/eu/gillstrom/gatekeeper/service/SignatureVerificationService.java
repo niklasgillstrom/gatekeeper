@@ -5,6 +5,7 @@ import eu.gillstrom.gatekeeper.util.Fingerprints;
 import eu.gillstrom.gatekeeper.audit.AuditAppendRequest;
 import eu.gillstrom.gatekeeper.audit.AuditLog;
 import eu.gillstrom.gatekeeper.audit.MtlsPrincipalResolver;
+import eu.gillstrom.gatekeeper.model.IssuanceConfirmationResponse.RegistryStatus;
 import eu.gillstrom.gatekeeper.model.SignatureVerificationRequest;
 import eu.gillstrom.gatekeeper.model.SignatureVerificationResponse;
 import lombok.RequiredArgsConstructor;
@@ -220,13 +221,42 @@ public class SignatureVerificationService {
                     .build();
         }
 
-        boolean compliant = registryEntry.isCompliant();
+        boolean compliant = isSettlementCompliant(registryEntry);
         return SignatureVerificationResponse.builder()
                 .signatureValid(true)
                 .compliant(compliant)
                 .auditEntryId(registryEntry.getVerificationId())
                 .reason(compliant ? "OK" : "CERT_NON_COMPLIANT")
                 .build();
+    }
+
+    /**
+     * Whether a registry entry may still back a settlement at this moment.
+     *
+     * <p>The registry's {@code compliant} flag records the outcome of the
+     * attestation verification at Step 3 and is never rewritten afterwards.
+     * The Step-7 confirmation outcome lives in {@code status}. Reading only
+     * the flag therefore kept answering {@code compliant=true} for an entry
+     * whose confirmation had already been recorded as an anomaly — a
+     * certificate whose public key did not match the attested key
+     * ({@code ANOMALY_PUBLIC_KEY_MISMATCH}) still settled payments, which
+     * is precisely the circumvention the Step-7 loop exists to detect.</p>
+     *
+     * <p>A settlement is therefore allowed only when the verification was
+     * compliant <em>and</em> the confirmation did not end in an anomaly or a
+     * rejection. A {@code null} status means Step 7 has not been received
+     * yet; that is the ordinary state between issuance and confirmation and
+     * is not by itself disqualifying.</p>
+     */
+    private static boolean isSettlementCompliant(ApprovalRegistry.RegistryEntry entry) {
+        if (!entry.isCompliant()) {
+            return false;
+        }
+        RegistryStatus status = entry.getStatus();
+        if (status == null) {
+            return true;
+        }
+        return !status.name().startsWith("ANOMALY") && status != RegistryStatus.REJECTED_NOT_ISSUED;
     }
 
     /**

@@ -34,8 +34,12 @@ import java.util.Optional;
  *       periodically (e.g. daily) to a public commitment log so the
  *       audit trail cannot be retroactively rewritten without
  *       detection.</li>
- *   <li>{@code GET /health} — operational health, including the
- *       outcome of {@link AuditLog#verifyChainIntegrity()}.</li>
+ *   <li>{@code GET /health} — operational health, including the most
+ *       recent outcome of {@link AuditLog#verifyChainIntegrity()} as
+ *       served by {@link AuditLog#cachedIntegrityStatus()} and the
+ *       instant it was computed. Requires the {@code SUPERVISOR} role;
+ *       unlike {@code /keys} and {@code /anchor} it is not evidence a
+ *       relying party needs, and it reports operational state.</li>
  * </ul>
  *
  * <p>Legal basis:</p>
@@ -128,16 +132,29 @@ public class GatekeeperController {
     @Operation(
         summary = "Operational health including audit-chain integrity",
         description = """
-                Returns whether the audit log is readable, whether
-                verifyChainIntegrity() currently passes, the head sequence
-                number and timestamp, the total number of entries, the
-                fingerprint of the active signing key, and the signing
-                mode (configured or ephemeral). Monitoring systems should
-                fail closed if chainIntact is false or mode is "ephemeral"
-                in production.""")
+                Returns whether the audit log is readable, the most recent
+                chain-integrity result together with the instant it was
+                computed, the head sequence number and timestamp, the total
+                number of entries, the fingerprint of the active signing
+                key, and the signing mode (configured or ephemeral).
+                Monitoring systems should fail closed if chainIntact is
+                false or mode is "ephemeral" in production.
+
+                The integrity result is cached: it is recomputed at most
+                once per gatekeeper.audit.integrity-check-interval-seconds
+                (default 300) rather than on every request, because the
+                walk is O(chain length) with one signature verification per
+                entry. chainCheckedAt tells the caller how old the answer
+                is; a monitoring system that needs it fresher lowers the
+                interval rather than polling harder.
+
+                Requires the SUPERVISOR role: the response discloses the
+                chain length and head sequence number, i.e. how much
+                supervisory activity the gatekeeper has recorded, and the
+                integrity check is not work an anonymous caller should be
+                able to trigger.""")
     public ResponseEntity<HealthStatus> health() {
         boolean readable;
-        boolean intact;
         long size = 0;
         long headSeq = 0;
         java.time.Instant headTs = null;
@@ -152,13 +169,15 @@ public class GatekeeperController {
         } catch (Exception e) {
             readable = false;
         }
+        AuditLog.IntegrityStatus integrity;
         try {
-            intact = auditLog.verifyChainIntegrity();
+            integrity = auditLog.cachedIntegrityStatus();
         } catch (Exception e) {
-            intact = false;
+            integrity = new AuditLog.IntegrityStatus(false, null);
         }
         HealthStatus status = new HealthStatus(
-                readable, intact, headSeq, headTs, size,
+                readable, integrity.intact(), integrity.checkedAt(),
+                headSeq, headTs, size,
                 keyDirectory.activeFingerprintHex(), mode);
         return ResponseEntity.ok(status);
     }

@@ -12,8 +12,15 @@ import java.time.Instant;
  *
  * @param auditLogReadable {@code true} iff the audit log file can be
  *     read and parsed
- * @param chainIntact result of {@link
- *     eu.gillstrom.gatekeeper.audit.AuditLog#verifyChainIntegrity()}
+ * @param chainIntact most recent result of {@link
+ *     eu.gillstrom.gatekeeper.audit.AuditLog#verifyChainIntegrity()},
+ *     served from the cache described on {@link
+ *     eu.gillstrom.gatekeeper.audit.AuditLog#cachedIntegrityStatus()}
+ * @param chainCheckedAt when {@code chainIntact} was computed. The value
+ *     is deliberately exposed: a monitoring system needs to know how stale
+ *     the integrity answer is, and an operator who wants a fresher one
+ *     lowers {@code gatekeeper.audit.integrity-check-interval-seconds}.
+ *     {@code null} means no check has completed yet
  * @param headSequenceNumber sequence of the head entry (0 for empty)
  * @param headTimestamp timestamp of the head entry, or {@code null} for
  *     an empty log
@@ -27,6 +34,7 @@ import java.time.Instant;
 public record HealthStatus(
         boolean auditLogReadable,
         boolean chainIntact,
+        Instant chainCheckedAt,
         long headSequenceNumber,
         Instant headTimestamp,
         long totalEntries,

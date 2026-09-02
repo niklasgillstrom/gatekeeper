@@ -21,7 +21,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * <p>Implements the 7-step verification flow described in README.md.</p>
  *
  * <p>Run with: {@code --spring.profiles.active=nca}
- * Swagger UI: http://localhost:8080/swagger-ui.html</p>
+ * Swagger UI (dev profile only): http://localhost:8080/swagger-ui.html</p>
  *
  * <p>© 2025-2026 Niklas Gillström &lt;https://orcid.org/0009-0001-6485-4596&gt; — MIT Licence</p>
  */

@@ -67,6 +67,17 @@ public class VerificationService {
     private final AuditLog auditLog;
     private final MtlsPrincipalResolver principalResolver;
 
+    /**
+     * Whether the confirm-time principal binding is enforced. Follows
+     * {@code gatekeeper.security.mtls.enabled}: with the permissive
+     * reference filter chain there is no authenticated caller to bind to,
+     * so the check is skipped and {@link #warnIfPrincipalBindingDisabled()}
+     * says so at startup, in the same manner as the other permissive
+     * warnings ({@code SecurityConfig}, {@code EphemeralReceiptSigner},
+     * {@code InMemoryApprovalRegistry}).
+     */
+    private final boolean mtlsEnabled;
+
     public VerificationService(
             SecurosysVerifier securosysVerifier,
             YubicoVerifier yubicoVerifier,
@@ -76,7 +87,10 @@ public class VerificationService {
             ReceiptSigner receiptSigner,
             IssuerCaValidator issuerCaValidator,
             AuditLog auditLog,
-            MtlsPrincipalResolver principalResolver) {
+            MtlsPrincipalResolver principalResolver,
+            @org.springframework.beans.factory.annotation.Value(
+                    "${gatekeeper.security.mtls.enabled:false}") boolean mtlsEnabled) {
+        this.mtlsEnabled = mtlsEnabled;
         this.securosysVerifier = securosysVerifier;
         this.yubicoVerifier = yubicoVerifier;
         this.azureVerifier = azureVerifier;
@@ -86,6 +100,24 @@ public class VerificationService {
         this.issuerCaValidator = issuerCaValidator;
         this.auditLog = auditLog;
         this.principalResolver = principalResolver;
+    }
+
+    /**
+     * Startup notice when the confirm-time principal binding cannot be
+     * enforced, matching the existing permissive warnings so the relaxed
+     * stance cannot be deployed unnoticed.
+     */
+    @jakarta.annotation.PostConstruct
+    void warnIfPrincipalBindingDisabled() {
+        if (!mtlsEnabled) {
+            log.warn("Step-7 confirm principal binding is DISABLED "
+                    + "(gatekeeper.security.mtls.enabled=false). Any caller that knows a "
+                    + "verificationId and its confirmationNonce can close the loop, not only "
+                    + "the financial entity that performed the verification. This is the "
+                    + "REFERENCE configuration and MUST NOT be deployed to production. The "
+                    + "jurisdiction binding (countryCode in the path must match the registry "
+                    + "entry) is enforced regardless of this setting.");
+        }
     }
 
     /**
@@ -259,13 +291,15 @@ public class VerificationService {
         // it constant-time and rejects mismatches as Step-7 replay attempts.
         String confirmationNonce = generateConfirmationNonce();
 
-        // Register in approval registry (Step 4)
+        // Register in approval registry (Step 4). The calling principal is
+        // bound to the entry so that only the same client can confirm it.
         approvalRegistry.register(
                 verificationId, confirmationNonce, compliant, publicKeyFingerprint,
                 request.getSupplierIdentifier(), request.getSupplierName(),
                 compliant ? vendor.getVendorName() : null,
                 compliant ? hsmModel : null,
-                request.getCountryCode());
+                request.getCountryCode(),
+                principalResolver.currentPrincipal());
 
         // Build signed verification receipt (Step 5)
         VerificationResponse receipt = VerificationResponse.builder()
@@ -469,7 +503,8 @@ public class VerificationService {
         approvalRegistry.register(
                 verificationId, confirmationNonce, false, null,
                 request.getSupplierIdentifier(), request.getSupplierName(),
-                null, null, request.getCountryCode());
+                null, null, request.getCountryCode(),
+                principalResolver.currentPrincipal());
 
         VerificationResponse receipt = VerificationResponse.builder()
                 .verificationId(verificationId)
@@ -624,14 +659,42 @@ public class VerificationService {
      * - Certificate issued despite NON-COMPLIANT attestation
      * - Public key in certificate does not match approved attestation
      * - Confirmation for unknown verification ID
+     *
+     * <p>Two bindings gate the lookup before any of that runs. The
+     * {@code countryCode} from the request path must match the registry
+     * entry's jurisdiction, and — when mTLS is enabled — the calling
+     * principal must be the one that performed the verification. A failure
+     * of either is reported exactly as an unknown {@code verificationId}:
+     * the caller learns nothing about entries in other jurisdictions or
+     * belonging to other entities.</p>
+     *
+     * @param confirmation the Step 7 payload
+     * @param countryCode jurisdiction from the request path, upper-cased by
+     *     the controller
      */
-    public IssuanceConfirmationResponse confirmIssuance(IssuanceConfirmation confirmation) {
+    public IssuanceConfirmationResponse confirmIssuance(IssuanceConfirmation confirmation,
+                                                        String countryCode) {
         List<String> anomalies = new ArrayList<>();
         Instant processedTimestamp = Instant.now();
 
-        // Look up the original verification in the registry
+        // Look up the original verification in the registry, scoped to the
+        // jurisdiction in the request path. A confirmation posted to another
+        // Member State's path does not resolve.
         Optional<ApprovalRegistry.RegistryEntry> entryOpt =
-                approvalRegistry.lookup(confirmation.getVerificationId());
+                approvalRegistry.lookup(confirmation.getVerificationId(), countryCode);
+
+        // Bind the confirmation to the client that performed the
+        // verification. Both this and the jurisdiction mismatch above fall
+        // into the same "unknown verificationId" branch on purpose: the
+        // response must not tell a caller that the entry exists but belongs
+        // to somebody else, or to another Member State.
+        if (entryOpt.isPresent() && !principalMatches(entryOpt.get())) {
+            log.warn("Confirm rejected for verificationId={}: calling principal '{}' is not the "
+                    + "principal that performed the verification. Reported as unknown "
+                    + "verificationId so the entry's existence is not disclosed.",
+                    confirmation.getVerificationId(), principalResolver.currentPrincipal());
+            entryOpt = Optional.empty();
+        }
 
         if (entryOpt.isEmpty()) {
             anomalies.add("ANOMALY: Confirmation received for unknown verification ID: "
@@ -672,7 +735,17 @@ public class VerificationService {
                 } else {
                     PublicKey certPublicKey = submittedCert.getPublicKey();
                     actualFingerprint = fingerprint(certPublicKey);
-                    publicKeyMatch = actualFingerprint.equals(expectedFingerprint);
+                    // Constant-time comparison. The values are public
+                    // fingerprints rather than secrets, but the comparison
+                    // decides whether an issued certificate is accepted as
+                    // the attested one, and String.equals leaks a prefix
+                    // length that an attacker submitting crafted
+                    // certificates can measure. MessageDigest.isEqual costs
+                    // nothing here and removes the question.
+                    publicKeyMatch = expectedFingerprint != null
+                            && MessageDigest.isEqual(
+                                    actualFingerprint.getBytes(StandardCharsets.UTF_8),
+                                    expectedFingerprint.getBytes(StandardCharsets.UTF_8));
 
                     if (!publicKeyMatch) {
                         anomalies.add("ANOMALY: Public key in issued certificate does not match "
@@ -733,6 +806,33 @@ public class VerificationService {
         appendConfirmAuditEntry(confirmation, resp);
 
         return resp;
+    }
+
+    /**
+     * Whether the current caller may confirm this entry.
+     *
+     * <p>Returns {@code true} unconditionally when mTLS is disabled (no
+     * authenticated caller exists to compare against — see
+     * {@link #warnIfPrincipalBindingDisabled()}) or when the entry carries
+     * no bound principal, which is the case for entries registered before
+     * this binding existed and for entries registered under the permissive
+     * chain. Fail-open on those two cases is deliberate: the alternative
+     * makes every pre-existing registry entry permanently unconfirmable
+     * after an upgrade.</p>
+     */
+    private boolean principalMatches(ApprovalRegistry.RegistryEntry entry) {
+        if (!mtlsEnabled) {
+            return true;
+        }
+        String bound = entry.getVerificationPrincipal();
+        if (bound == null || bound.isBlank()) {
+            return true;
+        }
+        String current = principalResolver.currentPrincipal();
+        return current != null
+                && MessageDigest.isEqual(
+                        bound.getBytes(StandardCharsets.UTF_8),
+                        current.getBytes(StandardCharsets.UTF_8));
     }
 
     // =========================================================================

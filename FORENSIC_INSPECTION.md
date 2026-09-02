@@ -30,7 +30,7 @@ The response carries the entry's `sequenceNumber`, `timestamp`, `mtlsClientPrinc
 
 The chain integrity proof binds every audit entry to every other audit entry. Two complementary primitives are available:
 
-- **`verifyChainIntegrity()` over a snapshot.** Run by the gatekeeper's own code path during `GET /v1/gatekeeper/health`. The boolean `chainIntact` in the health response is the proof for the operator that the chain is intact at the moment of the call. For court use, additionally export the chain (Section 2.3) and rerun `verifyChainIntegrity()` independently against the exported bytes — a court-appointed expert must be able to do this without trusting the NCA's tooling.
+- **`verifyChainIntegrity()` over a snapshot.** Run by the gatekeeper's own code path behind `GET /v1/gatekeeper/health`. From release 1.4.0 the result is cached and recomputed at most once per `gatekeeper.audit.integrity-check-interval-seconds`, so `chainIntact` is proof that the chain was intact at the instant reported in `chainCheckedAt`, not necessarily at the instant of the call — for an inspection record, cite the pair. For court use, additionally export the chain (Section 2.3) and rerun `verifyChainIntegrity()` independently against the exported bytes — a court-appointed expert must be able to do this without trusting the NCA's tooling.
 - **Anchor reconciliation.** Pair the chain head observed at time t1 with a previously published anchor at time t0 < t1. If the t0 anchor is reachable by walking back the chain from the t1 head, no entry pre-existing at t0 has been rewritten in the interval [t0, t1]. The t0 anchor, being a published commitment, is independent of the NCA's current state.
 
 ### 2.3 Signed export for an interval
@@ -103,7 +103,7 @@ A forensic verifier must be able to recompute every digest and verify every sign
 
 - **Algorithm:** as configured via `gatekeeper.signing.algorithm`. The reference default is `SHA256withRSA` for RSA seals; production NCA deployments using EC seals select `SHA384withECDSA` or per the seal's certified algorithm.
 - **Signature encoding:** standard Base64 with `=` padding.
-- **Signed input for receipts:** `ReceiptCanonicalizer.canonicalize(VerificationResponse)` — a UTF-8 byte sequence beginning with `v1|`.
+- **Signed input for receipts:** `ReceiptCanonicalizer.canonicalize(VerificationResponse)` — a UTF-8 byte sequence beginning with `v2|` (`v1|` for receipts issued before release 1.4.0; a receipt is re-verified with the canonicaliser version its own prefix names).
 - **Signed input for audit entries:** `thisEntryHashHex.getBytes(UTF_8)`. Signing the hex form of the chain hash, rather than the raw 32-byte digest, keeps the signature input identical to what is published in the JSON Lines storage form, which simplifies retroactive verification.
 - **Signed input for export bundles:** `AuditExport.canonicalBytesForSignature(...)` — combines `inspectionId`, `generatedAt`, `from`, `to`, `entryCount`, the entries' chain hashes, and the active key fingerprint.
 

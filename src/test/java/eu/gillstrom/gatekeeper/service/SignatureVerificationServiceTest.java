@@ -119,6 +119,56 @@ class SignatureVerificationServiceTest {
         assertThat(response.getReason()).isEqualTo("CERT_NON_COMPLIANT");
     }
 
+    /**
+     * The registry's {@code compliant} flag records the Step-3 verdict and is
+     * never rewritten; the Step-7 outcome lives in {@code status}. Reading
+     * only the flag meant a certificate whose confirmation had already been
+     * recorded as {@code ANOMALY_PUBLIC_KEY_MISMATCH} — the issuer produced
+     * a certificate over a key that was not the attested one — kept settling
+     * payments, which is the circumvention the Step-7 loop exists to detect.
+     */
+    @Test
+    void deniesWhenConfirmationRecordedAnAnomalyDespiteACompliantVerification() throws Exception {
+        registry.put(publicKeyFingerprint,
+                buildEntry("VID-ANOMALY", true, RegistryStatus.ANOMALY_PUBLIC_KEY_MISMATCH));
+
+        SignatureVerificationResponse response = service.verify(signedRequest("payload-M"));
+
+        assertThat(response.isSignatureValid()).isTrue();
+        assertThat(response.isCompliant())
+                .as("an anomalous Step-7 outcome disqualifies the entry at settlement time "
+                    + "even though the attestation itself verified")
+                .isFalse();
+        assertThat(response.getAuditEntryId()).isEqualTo("VID-ANOMALY");
+        assertThat(response.getReason()).isEqualTo("CERT_NON_COMPLIANT");
+    }
+
+    @Test
+    void deniesWhenConfirmationRecordedIssuanceDespiteRejection() throws Exception {
+        registry.put(publicKeyFingerprint,
+                buildEntry("VID-DESPITE", true, RegistryStatus.ANOMALY_ISSUED_DESPITE_REJECTION));
+
+        SignatureVerificationResponse response = service.verify(signedRequest("payload-N"));
+
+        assertThat(response.isCompliant()).isFalse();
+        assertThat(response.getReason()).isEqualTo("CERT_NON_COMPLIANT");
+    }
+
+    /**
+     * A verification awaiting Step 7 ({@code status == null}) is the ordinary
+     * state between issuance and confirmation and must keep settling — the
+     * fix above must not deny everything that has not been confirmed yet.
+     */
+    @Test
+    void allowsSettlementWhileStillAwaitingConfirmation() throws Exception {
+        registry.put(publicKeyFingerprint, buildEntry("VID-AWAITING", true, null));
+
+        SignatureVerificationResponse response = service.verify(signedRequest("payload-O"));
+
+        assertThat(response.isCompliant()).isTrue();
+        assertThat(response.getReason()).isEqualTo("OK");
+    }
+
     @Test
     void deniesWhenSignatureDoesNotMatchDigest() throws Exception {
         registry.put(publicKeyFingerprint,
@@ -346,7 +396,7 @@ class SignatureVerificationServiceTest {
         @Override
         public RegistryEntry register(String verificationId, String confirmationNonce, boolean compliant,
                 String publicKeyFingerprint, String supplierIdentifier, String supplierName,
-                String hsmVendor, String hsmModel, String countryCode) {
+                String hsmVendor, String hsmModel, String countryCode, String verificationPrincipal) {
             throw new UnsupportedOperationException();
         }
 

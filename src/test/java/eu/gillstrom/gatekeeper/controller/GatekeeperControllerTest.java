@@ -152,6 +152,32 @@ class GatekeeperControllerTest {
         assertThat(body.get("mode").asText()).isEqualTo("ephemeral");
     }
 
+    /**
+     * Health serves the cached integrity result and says when it was
+     * computed, rather than walking the chain per request. The instant must
+     * be present — a monitoring system that cannot tell how stale the
+     * answer is cannot act on it — and must not move between two calls
+     * inside the configured interval.
+     */
+    @Test
+    void healthEndpointServesCachedIntegrityResultWithTimestamp() throws Exception {
+        auditLog.append(new AuditAppendRequest(
+                "CN=test", "VERIFY", "v-h2",
+                base64Sha256("req"), base64Sha256("rcpt"), true));
+
+        JsonNode first = json.readTree(mockMvc.perform(get("/v1/gatekeeper/health"))
+                .andReturn().getResponse().getContentAsString());
+        JsonNode second = json.readTree(mockMvc.perform(get("/v1/gatekeeper/health"))
+                .andReturn().getResponse().getContentAsString());
+
+        assertThat(first.hasNonNull("chainCheckedAt")).isTrue();
+        assertThat(first.get("chainIntact").asBoolean()).isTrue();
+        assertThat(second.get("chainCheckedAt").asText())
+                .as("the integrity check must not be re-run per request within the "
+                    + "configured interval")
+                .isEqualTo(first.get("chainCheckedAt").asText());
+    }
+
     private static String base64Sha256(String s) throws Exception {
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         return Base64.getEncoder().encodeToString(md.digest(s.getBytes(StandardCharsets.UTF_8)));

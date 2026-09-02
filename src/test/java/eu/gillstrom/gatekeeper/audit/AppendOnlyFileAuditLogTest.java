@@ -233,6 +233,84 @@ class AppendOnlyFileAuditLogTest {
         assertThat(second.verifyChainIntegrity()).isTrue();
     }
 
+    // ---------------------------------------------------------------------
+    // Cached chain-integrity status
+    // ---------------------------------------------------------------------
+
+    /**
+     * {@code GET /v1/gatekeeper/health} called {@code verifyChainIntegrity()}
+     * on every request — an O(chain length) walk with one RSA verification
+     * per entry, executed while holding the append lock. The cache bounds
+     * how often that walk runs; the reported instant is what tells the
+     * caller how old the answer is.
+     */
+    @Test
+    void integrityStatusIsCachedWithinTheConfiguredInterval() {
+        Path file = tempDir.resolve("cached.jsonl");
+        AppendOnlyFileAuditLog log = new AppendOnlyFileAuditLog(file.toString(), signer, 300);
+        log.initialise();
+        log.append(sampleRequest("1", true, "VERIFY"));
+
+        AuditLog.IntegrityStatus first = log.cachedIntegrityStatus();
+        AuditLog.IntegrityStatus second = log.cachedIntegrityStatus();
+
+        assertThat(first.intact()).isTrue();
+        assertThat(first.checkedAt()).isNotNull();
+        assertThat(second.checkedAt())
+                .as("second call within the interval must serve the same computed result, "
+                    + "not walk the chain again")
+                .isEqualTo(first.checkedAt());
+    }
+
+    /**
+     * A zero interval means "recompute on every call". Asserted so the
+     * property the tests below rely on is itself pinned, and so an operator
+     * who sets the interval to zero gets the documented behaviour.
+     */
+    @Test
+    void zeroIntervalRecomputesOnEveryCall() throws Exception {
+        Path file = tempDir.resolve("uncached.jsonl");
+        AppendOnlyFileAuditLog log = new AppendOnlyFileAuditLog(file.toString(), signer, 0);
+        log.initialise();
+        log.append(sampleRequest("1", true, "VERIFY"));
+
+        AuditLog.IntegrityStatus first = log.cachedIntegrityStatus();
+        Thread.sleep(10);
+        AuditLog.IntegrityStatus second = log.cachedIntegrityStatus();
+
+        assertThat(first.intact()).isTrue();
+        assertThat(second.intact()).isTrue();
+        assertThat(second.checkedAt()).isAfter(first.checkedAt());
+    }
+
+    /**
+     * The cache must not turn into a way of hiding tampering: once the
+     * interval elapses the walk runs again and reports the broken chain.
+     */
+    @Test
+    void cachedStatusReportsTamperingOnceRecomputed() throws IOException {
+        Path file = tempDir.resolve("cached-tamper.jsonl");
+        AppendOnlyFileAuditLog log = new AppendOnlyFileAuditLog(file.toString(), signer, 0);
+        log.initialise();
+        log.append(sampleRequest("a", true, "VERIFY"));
+        log.append(sampleRequest("b", true, "VERIFY"));
+        log.append(sampleRequest("c", true, "VERIFY"));
+
+        assertThat(log.cachedIntegrityStatus().intact()).isTrue();
+
+        List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.registerModule(new JavaTimeModule());
+        ObjectNode node = (ObjectNode) mapper.readTree(lines.get(1));
+        node.put("compliant", !node.get("compliant").asBoolean());
+        lines.set(1, mapper.writeValueAsString(node));
+        Files.write(file, lines, StandardCharsets.UTF_8);
+
+        AppendOnlyFileAuditLog reloaded = new AppendOnlyFileAuditLog(file.toString(), signer, 0);
+        reloaded.initialise();
+        assertThat(reloaded.cachedIntegrityStatus().intact()).isFalse();
+    }
+
     @Test
     void appendIsConsistentAcrossInstancesViaPersistence() {
         // Documenting the contract: a second instance opening the same file

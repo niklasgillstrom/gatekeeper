@@ -24,7 +24,7 @@ mvn -U clean package
 mvn -U clean package -Ddependency-check.skip=true
 ```
 
-The artefact lands in `target/gatekeeper-1.0.0.jar`.
+The artefact lands in `target/gatekeeper-1.4.0.jar`.
 
 ### 1.2 Runtime environment (production host)
 
@@ -180,7 +180,7 @@ A separate config overlay (`application-nca-overrides.yaml` loaded via `--spring
 
 The settlement-rail client provisions a single mTLS client certificate per environment (test, production) and the gatekeeper authorises it under the `SETTLEMENT_RAIL` role to call `POST /api/v1/verify`. The reference deployment scenario is documented in the railgate companion repo (`railgate/README.md`).
 
-Public endpoints (`/v1/gatekeeper/keys`, `/v1/gatekeeper/anchor`, `/v1/gatekeeper/health`, `/v1/attestation/health`, `/v1/attestation/supported-vendors`, OpenAPI/Swagger) are reachable without authentication so a relying party can verify retroactive receipt evidence under DORA Article 28(6) without holding a client cert.
+Public endpoints (`/v1/gatekeeper/keys`, `/v1/gatekeeper/anchor`, `/v1/attestation/health`, `/v1/attestation/supported-vendors`) are reachable without authentication so a relying party can verify retroactive receipt evidence under DORA Article 28(6) without holding a client cert. `/v1/gatekeeper/health` is **not** among them from release 1.4.0: it reports operational state rather than evidence and requires the `SUPERVISOR` role, so a monitoring pipeline calling it needs a client certificate that maps to that role. The OpenAPI document and Swagger UI are disabled in the `nca` and `eba` profiles (`springdoc.*.enabled=false`); they are served only with the `dev` profile, which must not be active on a deployed host.
 
 To override the defaults, ship an additional config file (e.g. `application-nca-overrides.yaml`) with the NCA's own patterns and add it to the Spring profile chain via `--spring.config.additional-location=...`.
 
@@ -192,7 +192,7 @@ The first startup of a new deployment should follow this sequence to verify the 
 
 ```bash
 # 1. Verify the JAR exists and has the right version
-java -jar target/gatekeeper-1.0.0.jar --version 2>&1 | head
+java -jar target/gatekeeper-1.4.0.jar --version 2>&1 | head
 
 # 2. Pre-flight: keystore reachability and password correctness
 keytool -list -keystore "$GATEKEEPER_SEAL_KEYSTORE" -storepass "$GATEKEEPER_SEAL_KEYSTORE_PASSWORD" -storetype PKCS12
@@ -200,7 +200,7 @@ keytool -list -keystore "$GATEKEEPER_SERVER_KEYSTORE" -storepass "$GATEKEEPER_SE
 keytool -list -keystore "$GATEKEEPER_TRUSTSTORE" -storepass "$GATEKEEPER_TRUSTSTORE_PASSWORD" -storetype PKCS12
 
 # 3. Boot with the NCA profile
-java -jar target/gatekeeper-1.0.0.jar --spring.profiles.active=nca
+java -jar target/gatekeeper-1.4.0.jar --spring.profiles.active=nca
 
 # 4. In another shell, smoke-test the public endpoints (no client cert needed)
 curl -s --cacert <server-CA> https://gatekeeper.fi.se:8443/v1/gatekeeper/health

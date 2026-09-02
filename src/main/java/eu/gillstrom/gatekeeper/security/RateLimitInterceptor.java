@@ -173,9 +173,17 @@ public class RateLimitInterceptor implements HandlerInterceptor {
             throws Exception {
         String path = request.getRequestURI();
 
-        // Health and OpenAPI docs are exempt — they must remain reachable for
-        // liveness probes and operator tooling even under load.
-        if (path.endsWith("/health")
+        // Liveness and OpenAPI docs are exempt — they must remain reachable
+        // for liveness probes and operator tooling even under load.
+        //
+        // The exemption used to be `path.endsWith("/health")`, which also
+        // exempted /v1/gatekeeper/health. That endpoint is not a liveness
+        // probe: it reads the audit chain and reports its integrity, so it
+        // was the one unauthenticated, unlimited endpoint that did real
+        // work per call. It is now authenticated (SUPERVISOR) and limited.
+        // Only the trivial /v1/attestation/health, which returns a constant
+        // string, remains exempt.
+        if (path.equals("/v1/attestation/health")
                 || path.startsWith("/swagger-ui")
                 || path.startsWith("/v3/api-docs")) {
             return true;
@@ -329,6 +337,14 @@ public class RateLimitInterceptor implements HandlerInterceptor {
         }
         if (path.startsWith("/v1/audit")) {
             return auditBuckets;
+        }
+        if (path.startsWith("/v1/gatekeeper")) {
+            // /keys, /anchor and /health. Supervisory-shaped reads: /anchor
+            // signs the head on every call and /health reads the chain, so
+            // they belong under a limit, and the registry bucket is the one
+            // sized for supervisory read volume. No sixth bucket is
+            // introduced — five is what the deployment configures.
+            return registryBuckets;
         }
         if (path.contains("/registry/")) {
             return registryBuckets;

@@ -8,6 +8,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.signing.ReceiptSigner;
@@ -35,6 +36,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -64,7 +66,12 @@ import java.util.concurrent.locks.ReentrantLock;
  * a {@link ReentrantLock}. The lock is acquired interruptibly so a
  * shutdown hook cannot wedge a worker thread; on interrupt the operation
  * fails with {@link AuditLogException}. Read methods take a snapshot of
- * the in-memory entry list, so they never observe a half-built entry.</p>
+ * the in-memory entry list, so they never observe a half-built entry.
+ * {@link #verifyChainIntegrity()} copies the list under the lock and then
+ * releases it before recomputing hashes and verifying signatures — the
+ * walk is O(n) with one RSA verification per entry and must not sit in the
+ * append path. {@link #cachedIntegrityStatus()} additionally bounds how
+ * often that walk runs.</p>
  *
  * <p>Legal basis: see {@link AuditLog} javadoc.</p>
  */
@@ -73,10 +80,37 @@ public class AppendOnlyFileAuditLog implements AuditLog {
 
     private static final Logger log = LoggerFactory.getLogger(AppendOnlyFileAuditLog.class);
 
+    /** Default recompute interval for {@link #cachedIntegrityStatus()}. */
+    public static final long DEFAULT_INTEGRITY_CHECK_INTERVAL_SECONDS = 300L;
+
     private final Path filePath;
     private final ReceiptSigner signer;
     private final ObjectMapper json;
     private final ReentrantLock appendLock = new ReentrantLock();
+
+    /**
+     * How long a chain-integrity result is served before it is recomputed.
+     * Configured via {@code gatekeeper.audit.integrity-check-interval-seconds}.
+     * Zero or negative means "recompute on every call" and is intended for
+     * tests only.
+     */
+    private final long integrityCheckIntervalSeconds;
+
+    /**
+     * Last computed integrity result, or {@code null} before the first check.
+     * Written by {@link #verifyChainIntegrity()} and
+     * {@link #cachedIntegrityStatus()}; read without locking.
+     */
+    private final AtomicReference<IntegrityStatus> cachedIntegrity = new AtomicReference<>();
+
+    /**
+     * Held while a recompute is in flight. Separate from {@link #appendLock}
+     * on purpose: the whole point of the change is that the O(n) RSA walk
+     * runs outside the append path, so a concurrent verify is never blocked
+     * by a health poll, and a second health poll serves the previous answer
+     * rather than queueing behind the first.
+     */
+    private final ReentrantLock integrityComputeLock = new ReentrantLock();
 
     /**
      * In-memory mirror of the on-disk chain. Reads (range, principal,
@@ -86,11 +120,24 @@ public class AppendOnlyFileAuditLog implements AuditLog {
      */
     private final List<AuditEntry> entries = new ArrayList<>();
 
+    /**
+     * Convenience constructor using
+     * {@link #DEFAULT_INTEGRITY_CHECK_INTERVAL_SECONDS}. Not the
+     * Spring-injected one — see the {@link Autowired} constructor below.
+     */
+    public AppendOnlyFileAuditLog(String configuredPath, ReceiptSigner signer) {
+        this(configuredPath, signer, DEFAULT_INTEGRITY_CHECK_INTERVAL_SECONDS);
+    }
+
+    @Autowired
     public AppendOnlyFileAuditLog(
             @Value("${gatekeeper.audit.path:./audit-log.jsonl}") String configuredPath,
-            ReceiptSigner signer) {
+            ReceiptSigner signer,
+            @Value("${gatekeeper.audit.integrity-check-interval-seconds:300}")
+            long integrityCheckIntervalSeconds) {
         this.filePath = Paths.get(configuredPath);
         this.signer = signer;
+        this.integrityCheckIntervalSeconds = integrityCheckIntervalSeconds;
         @SuppressWarnings("deprecation")
         ObjectMapper mapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule())
@@ -176,7 +223,8 @@ public class AppendOnlyFileAuditLog implements AuditLog {
         // Run a full chain-integrity check after loading so any tampering
         // since the previous shutdown is surfaced at startup, not only the
         // first time a supervisor calls /v1/audit/health.
-        boolean intactAtBoot = verifyChainIntegrityNoLock();
+        boolean intactAtBoot = verifyChain(List.copyOf(entries));
+        cachedIntegrity.set(new IntegrityStatus(intactAtBoot, Instant.now()));
         if (!intactAtBoot && !entries.isEmpty()) {
             log.warn("AppendOnlyFileAuditLog: chain integrity check FAILED at startup. The audit "
                     + "log at {} appears to have been tampered with. Continuing to boot — "
@@ -188,37 +236,6 @@ public class AppendOnlyFileAuditLog implements AuditLog {
                 entries.size(), filePath.toAbsolutePath(),
                 entries.isEmpty() ? 0 : entries.get(entries.size() - 1).sequenceNumber(),
                 intactAtBoot);
-    }
-
-    /**
-     * Internal chain-integrity check executed during {@link #initialise()}
-     * before the lock-acquiring read methods are exposed to callers.
-     * Identical logic to {@link #verifyChainIntegrity()} but does not
-     * acquire {@link #appendLock} (we are still inside @PostConstruct).
-     */
-    private boolean verifyChainIntegrityNoLock() {
-        String expectedPrev = AuditEntry.SENTINEL_PREV_HASH_HEX;
-        long expectedSeq = 1;
-        for (AuditEntry e : entries) {
-            if (e.sequenceNumber() != expectedSeq) {
-                return false;
-            }
-            if (!e.prevEntryHashHex().equals(expectedPrev)) {
-                return false;
-            }
-            String recomputed = sha256Hex(AuditEntry.canonicalBytesForHash(e));
-            if (!MessageDigest.isEqual(
-                    recomputed.getBytes(StandardCharsets.UTF_8),
-                    e.thisEntryHashHex().getBytes(StandardCharsets.UTF_8))) {
-                return false;
-            }
-            if (!verifySignature(e)) {
-                return false;
-            }
-            expectedSeq = e.sequenceNumber() + 1;
-            expectedPrev = e.thisEntryHashHex();
-        }
-        return true;
     }
 
     /**
@@ -402,40 +419,104 @@ public class AppendOnlyFileAuditLog implements AuditLog {
 
     @Override
     public boolean verifyChainIntegrity() {
+        boolean intact = verifyChain(snapshot());
+        cachedIntegrity.set(new IntegrityStatus(intact, Instant.now()));
+        return intact;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Recomputes at most once per
+     * {@code gatekeeper.audit.integrity-check-interval-seconds} (default
+     * {@value #DEFAULT_INTEGRITY_CHECK_INTERVAL_SECONDS}). The recompute
+     * itself takes a snapshot of the entry list under {@link #appendLock}
+     * and then releases the lock before walking the chain, so the RSA
+     * verifications never block a concurrent {@code append}.</p>
+     */
+    @Override
+    public IntegrityStatus cachedIntegrityStatus() {
+        IntegrityStatus current = cachedIntegrity.get();
+        if (isFresh(current)) {
+            return current;
+        }
+        if (current == null) {
+            // No answer at all yet — the caller has to wait for the first one.
+            integrityComputeLock.lock();
+        } else if (!integrityComputeLock.tryLock()) {
+            // A recompute is already running. Serving the previous result is
+            // the point of the cache: health must not queue behind the walk.
+            return current;
+        }
+        try {
+            IntegrityStatus latest = cachedIntegrity.get();
+            if (isFresh(latest)) {
+                return latest;
+            }
+            IntegrityStatus fresh = new IntegrityStatus(verifyChain(snapshot()), Instant.now());
+            cachedIntegrity.set(fresh);
+            return fresh;
+        } finally {
+            integrityComputeLock.unlock();
+        }
+    }
+
+    private boolean isFresh(IntegrityStatus status) {
+        if (status == null || status.checkedAt() == null) {
+            return false;
+        }
+        if (integrityCheckIntervalSeconds <= 0) {
+            return false;
+        }
+        return Instant.now().isBefore(status.checkedAt().plusSeconds(integrityCheckIntervalSeconds));
+    }
+
+    /**
+     * Copy the entry list under {@link #appendLock} so the chain walk can
+     * run without holding it. {@link AuditEntry} is a record of immutable
+     * fields, so the copy is a consistent view and not a defensive-copy
+     * illusion.
+     */
+    private List<AuditEntry> snapshot() {
         appendLock.lock();
         try {
-            String expectedPrev = AuditEntry.SENTINEL_PREV_HASH_HEX;
-            long expectedSeq = 1;
-            for (AuditEntry e : entries) {
-                if (e.sequenceNumber() != expectedSeq) {
-                    log.warn("AuditLog chain check failed: sequenceNumber gap at {} (expected {}, got {})",
-                            e.sequenceNumber(), expectedSeq, e.sequenceNumber());
-                    return false;
-                }
-                if (!e.prevEntryHashHex().equals(expectedPrev)) {
-                    log.warn("AuditLog chain check failed: prevEntryHash mismatch at sequenceNumber {}", e.sequenceNumber());
-                    return false;
-                }
-                String recomputed = sha256Hex(AuditEntry.canonicalBytesForHash(e));
-                if (!MessageDigest.isEqual(
-                        recomputed.getBytes(StandardCharsets.UTF_8),
-                        e.thisEntryHashHex().getBytes(StandardCharsets.UTF_8))) {
-                    log.warn("AuditLog chain check failed: thisEntryHash mismatch at sequenceNumber {} "
-                            + "(recomputed {}, stored {})",
-                            e.sequenceNumber(), recomputed, e.thisEntryHashHex());
-                    return false;
-                }
-                if (!verifySignature(e)) {
-                    log.warn("AuditLog chain check failed: signature did not verify at sequenceNumber {}", e.sequenceNumber());
-                    return false;
-                }
-                expectedSeq = e.sequenceNumber() + 1;
-                expectedPrev = e.thisEntryHashHex();
-            }
-            return true;
+            return List.copyOf(entries);
         } finally {
             appendLock.unlock();
         }
+    }
+
+    /** The chain walk itself. Takes no lock; operates on a snapshot. */
+    private boolean verifyChain(List<AuditEntry> chain) {
+        String expectedPrev = AuditEntry.SENTINEL_PREV_HASH_HEX;
+        long expectedSeq = 1;
+        for (AuditEntry e : chain) {
+            if (e.sequenceNumber() != expectedSeq) {
+                log.warn("AuditLog chain check failed: sequenceNumber gap at {} (expected {}, got {})",
+                        e.sequenceNumber(), expectedSeq, e.sequenceNumber());
+                return false;
+            }
+            if (!e.prevEntryHashHex().equals(expectedPrev)) {
+                log.warn("AuditLog chain check failed: prevEntryHash mismatch at sequenceNumber {}", e.sequenceNumber());
+                return false;
+            }
+            String recomputed = sha256Hex(AuditEntry.canonicalBytesForHash(e));
+            if (!MessageDigest.isEqual(
+                    recomputed.getBytes(StandardCharsets.UTF_8),
+                    e.thisEntryHashHex().getBytes(StandardCharsets.UTF_8))) {
+                log.warn("AuditLog chain check failed: thisEntryHash mismatch at sequenceNumber {} "
+                        + "(recomputed {}, stored {})",
+                        e.sequenceNumber(), recomputed, e.thisEntryHashHex());
+                return false;
+            }
+            if (!verifySignature(e)) {
+                log.warn("AuditLog chain check failed: signature did not verify at sequenceNumber {}", e.sequenceNumber());
+                return false;
+            }
+            expectedSeq = e.sequenceNumber() + 1;
+            expectedPrev = e.thisEntryHashHex();
+        }
+        return true;
     }
 
     /**

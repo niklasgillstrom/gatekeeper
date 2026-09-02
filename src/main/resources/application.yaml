@@ -61,7 +61,6 @@ gatekeeper:
     max-tracked-keys: 10000
     key-idle-seconds: 900
   audit:
-  audit:
     # Tamper-evident audit log location (JSON Lines).
     # Each append is fsynced; the file is hash-chained and signed under
     # the active gatekeeper signing key. DORA Article 28(6) mandates
@@ -71,6 +70,12 @@ gatekeeper:
     # DORA Article 28(6) minimum retention. Documented here so operators
     # can see the legal basis without consulting external docs.
     retention-years: 5
+    # How long a chain-integrity result is served before it is recomputed.
+    # The walk is O(chain length) with one signature verification per entry,
+    # so GET /v1/gatekeeper/health serves the cached answer plus the instant
+    # it was computed rather than running the walk per request. Lower this
+    # if monitoring needs a fresher answer; do not set it to 0 outside tests.
+    integrity-check-interval-seconds: ${GATEKEEPER_INTEGRITY_CHECK_INTERVAL_SECONDS:300}
   registry:
     # Approval-registry backend.
     #   in-memory — ConcurrentHashMap, state lost on restart. Reference default.
@@ -93,10 +98,17 @@ gatekeeper:
     mtls:
       enabled: ${GATEKEEPER_MTLS_ENABLED:false}
 
+# OpenAPI document and Swagger UI are off in every non-dev profile. Neither has
+# a run-time function in this service, and the UI is a third-party JavaScript
+# application (swagger-ui, DOMPurify) whose vulnerabilities would otherwise be
+# part of the deployed surface. Enable locally with --spring.profiles.active=dev
+# (application-dev.yaml).
 springdoc:
   api-docs:
-    path: /api-docs
+    enabled: false
+    path: /v3/api-docs
   swagger-ui:
+    enabled: false
     path: /swagger-ui.html
     operationsSorter: method
 

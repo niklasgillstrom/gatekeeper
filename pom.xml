@@ -7,13 +7,13 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.1.0</version>
+        <version>4.1.1</version>
         <relativePath/>
     </parent>
 
     <groupId>eu.gillstrom</groupId>
     <artifactId>gatekeeper</artifactId>
-    <version>1.3.0</version>
+    <version>1.4.0</version>
     <name>DORA Attestation Gatekeeper</name>
     <description>
         NCA-operated gatekeeper API for HSM attestation verification at
@@ -92,7 +92,7 @@
 
     <licenses>
         <license>
-            <name>MIT License</name>
+            <name>MIT</name>
             <url>https://opensource.org/licenses/MIT</url>
             <distribution>repo</distribution>
         </license>
@@ -100,6 +100,10 @@
 
     <properties>
         <java.version>21</java.version>
+        <!-- Spring Boot 4.1.1 manages Tomcat 11.0.24. Tomcat 11.0.25 (2026-08-18) fixes
+             CVE-2026-65182/65183/65637/65905/65927/66299/66422/68525/68569/68763/73180.
+             Remove this override when the parent manages >= 11.0.25. -->
+        <tomcat.version>11.0.25</tomcat.version>
     </properties>
 
     <dependencies>
@@ -128,7 +132,14 @@
         <dependency>
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
-            <version>3.0.3</version>
+            <version>3.1.0</version>
+        </dependency>
+        <!-- springdoc 3.1.0 ships swagger-ui 5.32.11 (DOMPurify 3.4.12, CVE-2026-75838).
+             Pin the newer webjar; drop this once springdoc itself moves past it. -->
+        <dependency>
+            <groupId>org.webjars</groupId>
+            <artifactId>swagger-ui</artifactId>
+            <version>5.32.14</version>
         </dependency>
 
         <!-- BouncyCastle for certificate parsing and verification -->
@@ -136,6 +147,13 @@
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcpkix-jdk18on</artifactId>
             <version>1.85</version>
+        </dependency>
+        <!-- bcpkix 1.85 declares bcprov 1.85; pin the 1.85.2 point release
+             (same as hsm) so both repos resolve the same provider. -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+            <version>1.85.2</version>
         </dependency>
 
         <!-- Lombok -->
@@ -175,7 +193,7 @@
                         <path>
                             <groupId>org.projectlombok</groupId>
                             <artifactId>lombok</artifactId>
-                            <version>1.18.46</version>
+                            <version>1.18.48</version>
                         </path>
                     </annotationProcessorPaths>
                 </configuration>
@@ -224,10 +242,13 @@
                 appropriate.
 
                 First run downloads the NVD database (~150 MB, cached in
-                ~/.m2). Setting the NVD_API_KEY environment variable
-                (https://nvd.nist.gov/developers/request-an-api-key) raises
-                the rate limit from 5 to 50 calls per 30s and is strongly
-                recommended for any pipeline that runs frequently.
+                ~/.m2) unauthenticated; that is slow but works. To use an
+                NVD API key, pass it on the command line:
+                mvn -Dnvd.api.key=... org.owasp:dependency-check-maven:check
+                Do not wire it through <nvdApiKey>${env.X}</nvdApiKey> —
+                an unset variable becomes an empty key, which NVD rejects.
+                Pinned to 12.2.2: 13.0.0 cannot run without a key at all
+                (dependency-check/DependencyCheck#8715).
             -->
             <plugin>
                 <groupId>org.owasp</groupId>
@@ -242,7 +263,6 @@
                     <suppressionFiles>
                         <suppressionFile>${project.basedir}/.owasp-suppressions.xml</suppressionFile>
                     </suppressionFiles>
-                    <nvdApiKey>${env.NVD_API_KEY}</nvdApiKey>
                 </configuration>
                 <executions>
                     <execution>

@@ -75,17 +75,40 @@ public interface ApprovalRegistry {
                            String supplierName,
                            String hsmVendor,
                            String hsmModel,
-                           String countryCode);
+                           String countryCode,
+                           String verificationPrincipal);
+
+    /**
+     * Convenience overload for callers with no authenticated principal to
+     * record (tests, and deployments running the permissive reference
+     * filter chain). Equivalent to passing {@code null} as
+     * {@code verificationPrincipal}, which disables the principal binding
+     * on {@code confirm} for that entry.
+     */
+    default RegistryEntry register(String verificationId,
+                                   String confirmationNonce,
+                                   boolean compliant,
+                                   String publicKeyFingerprint,
+                                   String supplierIdentifier,
+                                   String supplierName,
+                                   String hsmVendor,
+                                   String hsmModel,
+                                   String countryCode) {
+        return register(verificationId, confirmationNonce, compliant, publicKeyFingerprint,
+                supplierIdentifier, supplierName, hsmVendor, hsmModel, countryCode, null);
+    }
 
     /**
      * Update a registry entry with the Step 7 confirmation result.
      *
      * <p>The implementation MUST verify that {@code submittedNonce}
-     * matches the {@code confirmationNonce} bound at register time;
-     * implementations return {@link Optional#empty()} on mismatch so
-     * callers can distinguish "no such verificationId" from "nonce
-     * mismatch" via the {@link NonceMismatchException} signalling
-     * channel below.</p>
+     * matches the {@code confirmationNonce} bound at register time, and
+     * MUST check and consume the nonce atomically, so that two concurrent
+     * confirmations carrying the same nonce cannot both succeed.
+     * {@link Optional#empty()} means "no such verificationId";
+     * {@link NonceMismatchException} means "the nonce did not match" —
+     * two distinct outcomes so the controller can answer 404 and 400
+     * respectively.</p>
      */
     Optional<RegistryEntry> confirm(String verificationId,
                                     String submittedNonce,
@@ -109,6 +132,32 @@ public interface ApprovalRegistry {
 
     /** Look up a registry entry by verification ID. */
     Optional<RegistryEntry> lookup(String verificationId);
+
+    /**
+     * Look up a registry entry by verification ID <em>within one
+     * jurisdiction</em>.
+     *
+     * <p>{@code POST /v1/attestation/&#x7b;cc&#x7d;/confirm} carries a
+     * country code in the path and used to discard it, so a confirmation
+     * posted to {@code /DE/confirm} could close the loop on a Swedish
+     * entry. Registry contents are supervisory material under DORA Article
+     * 55; the jurisdiction in the URL has to be part of the lookup key, not
+     * decoration.</p>
+     *
+     * <p>Matching is exact and case-sensitive on {@code countryCode};
+     * callers normalise to upper case. An entry whose {@code countryCode}
+     * is {@code null}, or a {@code null} argument, matches nothing — the
+     * result is indistinguishable from an unknown {@code verificationId},
+     * which is the point: a caller must not be able to use the country
+     * code as an oracle for whether an entry exists elsewhere.</p>
+     */
+    default Optional<RegistryEntry> lookup(String verificationId, String countryCode) {
+        if (countryCode == null) {
+            return Optional.empty();
+        }
+        return lookup(verificationId)
+                .filter(e -> countryCode.equals(e.getCountryCode()));
+    }
 
     /** Find all entries for a given country code (for Article 17 investigations). */
     List<RegistryEntry> findByCountry(String countryCode);
@@ -214,6 +263,19 @@ public interface ApprovalRegistry {
         private String hsmVendor;
         private String hsmModel;
         private String countryCode;
+        /**
+         * The mTLS client principal that performed the Step 3 verification,
+         * as resolved by {@code MtlsPrincipalResolver} at register time.
+         *
+         * <p>Bound so that {@code confirm} can require the same principal:
+         * knowing a {@code verificationId} and its nonce is not by itself a
+         * reason to let a <em>different</em> financial entity close the
+         * loop. {@code null} when the gatekeeper runs the permissive
+         * reference filter chain ({@code gatekeeper.security.mtls.enabled=false}),
+         * where there is no authenticated caller to bind to; the binding is
+         * then skipped and the startup WARN says so.</p>
+         */
+        private String verificationPrincipal;
         private String verificationTimestamp;
         private String confirmationTimestamp;
         private RegistryStatus status;

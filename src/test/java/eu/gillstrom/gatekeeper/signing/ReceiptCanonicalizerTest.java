@@ -10,14 +10,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Unit tests for {@link ReceiptCanonicalizer}. The canonical form is a UTF-8
- * string prefixed with {@code v1|} and any mutation of a decision-relevant
+ * string prefixed with {@code v2|} and any mutation of a decision-relevant
  * field must produce a different byte array.
  */
 class ReceiptCanonicalizerTest {
 
     private VerificationResponse sampleReceipt(boolean compliant) {
+        return sampleReceipt(compliant, "nonce-0001");
+    }
+
+    private VerificationResponse sampleReceipt(boolean compliant, String confirmationNonce) {
         return VerificationResponse.builder()
                 .verificationId("vid-0001")
+                .confirmationNonce(confirmationNonce)
                 .compliant(compliant)
                 .verificationTimestamp(Instant.parse("2026-01-01T00:00:00Z"))
                 .publicKeyFingerprint("sha256:abcd")
@@ -52,8 +57,25 @@ class ReceiptCanonicalizerTest {
         byte[] canonical = ReceiptCanonicalizer.canonicalize(sampleReceipt(true));
 
         String asString = new String(canonical, StandardCharsets.UTF_8);
-        assertThat(asString).startsWith("v1|");
+        assertThat(asString).startsWith("v2|");
         assertThat(canonical).isNotEmpty();
+    }
+
+    /**
+     * The Step-7 confirmation nonce is delivered to the financial entity in
+     * the receipt and nowhere else. Leaving it outside the signed bytes (as
+     * canonical version {@code v1} did) let an intermediary substitute a
+     * nonce of its own choosing on a receipt in transit without breaking
+     * the signature.
+     */
+    @Test
+    void mutatingConfirmationNonceChangesCanonicalBytes() {
+        byte[] original = ReceiptCanonicalizer.canonicalize(sampleReceipt(true, "nonce-A"));
+        byte[] substituted = ReceiptCanonicalizer.canonicalize(sampleReceipt(true, "nonce-B"));
+
+        assertThat(original).isNotEqualTo(substituted);
+        assertThat(new String(original, StandardCharsets.UTF_8)).contains("|nonce-A|");
+        assertThat(new String(substituted, StandardCharsets.UTF_8)).contains("|nonce-B|");
     }
 
     @Test

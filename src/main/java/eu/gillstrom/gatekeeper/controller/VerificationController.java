@@ -149,14 +149,28 @@ public class VerificationController {
             @ApiResponse(responseCode = "400", description = "Invalid confirmation format, "
                     + "or submitted confirmationNonce does not match the nonce bound to the "
                     + "verificationId at verify time (Step-7 replay attempt)"),
-            @ApiResponse(responseCode = "404", description = "Unknown verification ID")
+            @ApiResponse(responseCode = "404", description = "No verification with this ID "
+                    + "in this jurisdiction that this client may confirm. The same response "
+                    + "is returned for an unknown verificationId, for one belonging to "
+                    + "another Member State's registry partition, and for one registered by "
+                    + "a different client — deliberately indistinguishable, so the endpoint "
+                    + "cannot be used to probe for entries the caller may not see.")
         }
     )
     public ResponseEntity<IssuanceConfirmationResponse> confirmIssuance(
             @PathVariable String countryCode,
             @Valid @RequestBody IssuanceConfirmation confirmation) {
         try {
-            IssuanceConfirmationResponse response = verificationService.confirmIssuance(confirmation);
+            IssuanceConfirmationResponse response =
+                    verificationService.confirmIssuance(confirmation, countryCode.toUpperCase());
+            if (response.getRegistryStatus()
+                    == IssuanceConfirmationResponse.RegistryStatus.ANOMALY_UNKNOWN_VERIFICATION) {
+                // 404, matching the documented contract. The body is the
+                // service's own anomaly response and is identical whichever
+                // of the three causes applies; the audit entry recording the
+                // attempt has already been appended.
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
+            }
             return ResponseEntity.ok(response);
         } catch (ApprovalRegistry.NonceMismatchException e) {
             // Step-7 replay attempt — nonce did not match the one bound at
@@ -204,7 +218,13 @@ public class VerificationController {
     )
     public ResponseEntity<BatchVerificationResponse> verifyBatch(
             @PathVariable String countryCode,
-            @Valid @RequestBody List<VerificationRequest> requests) {
+            // @Valid on the type argument, not only on the list. Bean
+            // validation does not descend into container elements
+            // otherwise, so every field constraint on VerificationRequest
+            // (@NotBlank publicKey, the @Size ceilings on the attestation
+            // blobs) was enforced for a single verify and ignored for the
+            // 200 elements of a batch.
+            @Valid @RequestBody List<@Valid VerificationRequest> requests) {
         if (requests.size() > MAX_BATCH_SIZE) {
             throw new ResponseStatusException(HttpStatus.CONTENT_TOO_LARGE,
                     "Batch contains " + requests.size() + " entries; the maximum is "

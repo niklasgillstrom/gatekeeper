@@ -108,6 +108,41 @@ public interface AuditLog {
      * Any failure returns {@code false}; passing all three for every
      * entry returns {@code true}. An empty log is considered intact
      * (vacuously true).
+     *
+     * <p>The walk is O(n) in the length of the chain and performs one
+     * signature verification per entry. Callers on a request thread should
+     * use {@link #cachedIntegrityStatus()} instead.</p>
      */
     boolean verifyChainIntegrity();
+
+    /**
+     * The most recent {@link #verifyChainIntegrity()} outcome together with
+     * the instant it was computed.
+     *
+     * <p>{@code GET /v1/gatekeeper/health} used to call
+     * {@link #verifyChainIntegrity()} synchronously on every request, which
+     * made an unauthenticated endpoint a lever for O(chain length) RSA work
+     * per call — and, in the file-backed implementation, made that work hold
+     * the append lock, so a health poll stalled every concurrent
+     * verification. Implementations recompute at most once per configured
+     * interval and serve the previous answer in between; the returned
+     * instant tells the caller how stale the answer is.</p>
+     *
+     * <p>The default implementation computes on every call and is intended
+     * only for test doubles and in-memory implementations whose chain is
+     * short enough for that to be free.</p>
+     */
+    default IntegrityStatus cachedIntegrityStatus() {
+        return new IntegrityStatus(verifyChainIntegrity(), Instant.now());
+    }
+
+    /**
+     * Outcome of a chain-integrity check and the instant it was performed.
+     *
+     * @param intact result of the walk described in
+     *     {@link #verifyChainIntegrity()}
+     * @param checkedAt when that walk ran; {@code null} if no check has run
+     *     yet (the implementation could not produce even a stale answer)
+     */
+    record IntegrityStatus(boolean intact, Instant checkedAt) {}
 }

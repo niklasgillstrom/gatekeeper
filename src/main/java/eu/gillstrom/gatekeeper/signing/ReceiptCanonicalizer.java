@@ -21,13 +21,33 @@ import java.util.StringJoiner;
  * here, and the version marker MUST be bumped. Signatures produced under
  * {@code v1} will still validate against the v1 canonicalizer; a mixed-
  * version receipt simply won't verify.</p>
+ *
+ * <h2>v2 — {@code confirmationNonce} covered</h2>
+ *
+ * <p>{@code v1} left the nonce out on the reasoning that it was
+ * "operational anti-replay, not decision-relevant". That reasoning does
+ * not hold: the nonce is the value that decides who may close the Step 7
+ * loop for this verification, it is delivered to the financial entity in
+ * this receipt and nowhere else, and an unsigned field in a signed
+ * document is a field an intermediary can rewrite without breaking the
+ * signature. Substituting a nonce of the attacker's choosing on a receipt
+ * in transit was therefore undetectable. From {@code v2} it sits in the
+ * canonical form, directly after the {@code verificationId} it is bound
+ * to.</p>
+ *
+ * <p><strong>Cross-repo consequence.</strong> The financial-entity side
+ * (the {@code hsm} repository) recomputes these bytes to verify the
+ * receipt signature and carries the same golden literal in its own
+ * {@code WireFormatGoldenBytesTest}. A gatekeeper on {@code v2} and an FE
+ * on {@code v1} will not agree on any receipt: the two repositories must
+ * be upgraded in lock-step. See {@code CHANGELOG.md} for 1.4.0.</p>
  */
 public final class ReceiptCanonicalizer {
 
     private ReceiptCanonicalizer() {
     }
 
-    public static final String CANONICAL_VERSION = "v1";
+    public static final String CANONICAL_VERSION = "v2";
 
     public static byte[] canonicalize(VerificationResponse r) {
         if (r == null) {
@@ -36,6 +56,7 @@ public final class ReceiptCanonicalizer {
         StringJoiner j = new StringJoiner("|");
         j.add(CANONICAL_VERSION);
         j.add(safe(r.getVerificationId()));
+        j.add(safe(r.getConfirmationNonce()));
         j.add(Boolean.toString(r.isCompliant()));
         j.add(r.getVerificationTimestamp() == null ? "" : r.getVerificationTimestamp().toString());
         j.add(safe(r.getPublicKeyFingerprint()));

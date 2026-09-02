@@ -133,7 +133,7 @@ A reviewer can make the following assertions by running `mvn -B test`.
 6. **AzureHsmVerifierTest.missingCertificatesFieldIsRejected** — structural rejection of attestations without `certificates`.
 7. **GoogleCloudHsmVerifierTest.chainNotRootedAtPinnedTrustAnchorIsRejected** — parallel to Azure; Google Cloud HSM verification anchors at Google's published attestation CA in production (Marvell LiquidSecurity is the underlying hardware shared with Azure, but Google's CA is the practical pinning point for Google-deployed HSMs).
 8. **GoogleCloudHsmVerifierTest.emptyChainIsRejected** — empty input fails.
-9. **ReceiptCanonicalizerTest.canonicalBytesStartWithVersionPrefix** — every canonical byte sequence begins `v1|`. Protects against silent format migrations.
+9. **ReceiptCanonicalizerTest.canonicalBytesStartWithVersionPrefix** — every canonical byte sequence begins `v2|` (it was `v1|` before release 1.4.0 brought `confirmationNonce` inside the signed form). Protects against silent format migrations.
 10. **ReceiptCanonicalizerTest.mutatingCompliantFieldChangesCanonicalBytes** — flipping `compliant` produces different canonical bytes; the receipt therefore signs over the compliance decision, not over a ceremonial subset. Directly substantiates Article 2 §8.5's authenticity claim.
 11. **ReceiptCanonicalizerTest.pipeCharactersInFieldsAreEscaped** — no field boundary can be smuggled.
 12. **EphemeralReceiptSignerTest.signAndVerifyRoundTripsAgainstExposedCertificate** — the signer produces RSA signatures verifiable against its own exposed certificate.

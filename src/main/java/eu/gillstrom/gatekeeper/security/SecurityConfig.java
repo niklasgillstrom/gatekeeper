@@ -55,11 +55,16 @@ import java.util.List;
  * </ul>
  *
  * <p>{@code SUPERVISOR}-only paths are denied to {@code FE}; the verify/
- * confirm paths accept either role. Public paths (gatekeeper key
- * directory, chain anchor, health, supported-vendors list, OpenAPI docs)
- * remain reachable without authentication so a relying party can verify
- * retroactive evidence under DORA Article 28(6) without holding a
- * client certificate.</p>
+ * confirm paths accept either role. The public paths are exactly:
+ * {@code /v1/attestation/health}, {@code /v1/attestation/supported-vendors},
+ * {@code /v1/gatekeeper/keys}, {@code /v1/gatekeeper/anchor},
+ * {@code /swagger-ui/**}, {@code /swagger-ui.html} and
+ * {@code /v3/api-docs/**}. The two gatekeeper endpoints are public because
+ * a relying party must be able to verify retroactive evidence under DORA
+ * Article 28(6) without holding a client certificate; the rest are
+ * liveness and documentation. {@code /v1/gatekeeper/health} is
+ * <em>not</em> in that set — it reports operational state, not evidence,
+ * and requires {@code SUPERVISOR}.</p>
  *
  * <h2>Reference (mTLS-disabled) chain</h2>
  *
@@ -111,7 +116,10 @@ public class SecurityConfig {
                         "/v1/attestation/supported-vendors",
                         "/v1/gatekeeper/keys",
                         "/v1/gatekeeper/anchor",
-                        "/v1/gatekeeper/health",
+                        // The three springdoc paths exist only under the
+                        // dev profile (springdoc.*.enabled=false elsewhere);
+                        // in every other profile they are 404 before this
+                        // rule matters.
                         "/swagger-ui/**",
                         "/swagger-ui.html",
                         "/v3/api-docs/**"
@@ -122,6 +130,17 @@ public class SecurityConfig {
                 // described in SUPERVISORY_OPERATIONS.md §3.5; they must
                 // not be reachable by FE clients.
                 .requestMatchers("/v1/audit/**").hasRole("SUPERVISOR")
+
+                // /v1/gatekeeper/health was in the permitAll list above.
+                // It is not evidence — a relying party verifying a receipt
+                // needs /keys and /anchor, not the operator's chain length,
+                // head sequence number and signing mode — and answering it
+                // costs a chain-integrity result. Supervisor-only, and the
+                // integrity result behind it is now cached rather than
+                // recomputed per call (see AuditLog.cachedIntegrityStatus).
+                // Liveness probes use /v1/attestation/health, which stays
+                // public and touches nothing.
+                .requestMatchers(HttpMethod.GET, "/v1/gatekeeper/health").hasRole("SUPERVISOR")
                 .requestMatchers(HttpMethod.GET, "/v1/attestation/*/registry/**").hasRole("SUPERVISOR")
 
                 // FE or supervisor — the verification protocol itself.

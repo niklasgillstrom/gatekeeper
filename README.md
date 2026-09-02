@@ -410,6 +410,7 @@ Accepts attestation evidence and returns an independent verification result with
 ```json
 {
   "verificationId": "8f1d2c4a-6b3e-4a5f-9c8d-1e2f3a4b5c6d",
+  "confirmationNonce": "9Qk7t0nO2s6bYyq0ZP1c8VJ0aXQ4tRk3mB1nS7dLuFo",
   "compliant": true,
   "verificationTimestamp": "2026-03-20T14:30:00Z",
   "signature": "MIIEpQIBAAKCAQEA...",
@@ -443,13 +444,14 @@ Accepts attestation evidence and returns an independent verification result with
 }
 ```
 
-The `signature` is a detached Base64-encoded RSA/ECDSA signature computed over the canonical byte representation of the decision-relevant fields (see `ReceiptCanonicalizer` — `v1|verificationId|compliant|timestamp|fingerprint|algorithm|hsmVendor|hsmModel|hsmSerialNumber|supplierIdentifier|supplierName|keyPurpose|countryCode|keyProperties...|doraCompliance...`). The `signingCertificate` PEM lets any party independently verify the signature without a prior key-exchange step. Under the NCA profile (`gatekeeper.signing.mode=configured`) the signing certificate is the NCA's organisation certificate — the certificate the NCA uses for ordinary administrative signing of supervisory acts. The reference `EphemeralReceiptSigner` produces a throwaway `CN=REFERENCE-EPHEMERAL` certificate marked as such.
+The `signature` is a detached Base64-encoded RSA/ECDSA signature computed over the canonical byte representation of the decision-relevant fields (see `ReceiptCanonicalizer` — `v2|verificationId|confirmationNonce|compliant|timestamp|fingerprint|algorithm|hsmVendor|hsmModel|hsmSerialNumber|supplierIdentifier|supplierName|keyPurpose|countryCode|keyProperties...|doraCompliance...`). The version marker moved from `v1` to `v2` in release 1.4.0 when `confirmationNonce` was brought inside the signed form; a financial entity still computing `v1` bytes will fail to verify every receipt, so the `hsm` repository must be upgraded in lock-step (see `CHANGELOG.md`). The `signingCertificate` PEM lets any party independently verify the signature without a prior key-exchange step. Under the NCA profile (`gatekeeper.signing.mode=configured`) the signing certificate is the NCA's organisation certificate — the certificate the NCA uses for ordinary administrative signing of supervisory acts. The reference `EphemeralReceiptSigner` produces a throwaway `CN=REFERENCE-EPHEMERAL` certificate marked as such.
 
 **Non-compliant response:**
 
 ```json
 {
   "verificationId": "2c9d4b6a-8e1f-4b3c-af2e-5d6a7b8c9d0e",
+  "confirmationNonce": "Tz3m5Xc9pQw1LbN8vR2kJ7dHs0YgU4eA6fC1oIhKrEs",
   "compliant": false,
   "verificationTimestamp": "2026-03-20T14:30:00Z",
   "signature": "MIIEpQIBAAKCAQEA...",
@@ -500,6 +502,7 @@ Step 7 of the verification flow. GetSwish AB (or the issuing bank) posts the out
 ```json
 {
   "verificationId": "8f1d2c4a-6b3e-4a5f-9c8d-1e2f3a4b5c6d",
+  "confirmationNonce": "9Qk7t0nO2s6bYyq0ZP1c8VJ0aXQ4tRk3mB1nS7dLuFo",
   "issued": true,
   "signingCertificatePem": "-----BEGIN CERTIFICATE-----\nMIIEozCCA4ugAwIBAgIUB...\n-----END CERTIFICATE-----\n",
   "timestamp": "2026-03-20T14:32:15Z",
@@ -513,6 +516,7 @@ Step 7 of the verification flow. GetSwish AB (or the issuing bank) posts the out
 ```json
 {
   "verificationId": "2c9d4b6a-8e1f-4b3c-af2e-5d6a7b8c9d0e",
+  "confirmationNonce": "Tz3m5Xc9pQw1LbN8vR2kJ7dHs0YgU4eA6fC1oIhKrEs",
   "issued": false,
   "signingCertificatePem": null,
   "timestamp": "2026-03-20T14:32:15Z",
@@ -654,9 +658,9 @@ The gatekeeper persists every decision into a hash-chained, append-only audit lo
 - `sequenceNumber` — strictly monotonic, starting at 1.
 - `timestamp` — ISO-8601 instant of the append.
 - `mtlsClientPrincipal` — the supervisory principal extracted from the mTLS client certificate (resolved via `MtlsPrincipalResolver`).
-- `operation` — one of `verify`, `verify-batch`, `confirm`.
+- `operation` — one of `VERIFY`, `BATCH_VERIFY`, `CONFIRM`, `SETTLEMENT_VERIFY`. The last is written by `SignatureVerificationService` for each `POST /api/v1/verify`, so a supervisor can separate issuance-time from settlement-time decisions.
 - `verificationId`, `requestDigestBase64`, `receiptDigestBase64`, `compliant` — the decision-relevant fields.
-- `prevEntryHashHex` — the SHA-256 of the predecessor entry's `thisEntryHashHex`. The first entry uses 64 ASCII zeros (`AuditEntry.SENTINEL_PREV_HASH_HEX`) so "empty log" is a deterministic, well-known starting point.
+- `prevEntryHashHex` — the predecessor entry's `thisEntryHashHex`, copied verbatim (not re-hashed). The first entry uses 64 ASCII zeros (`AuditEntry.SENTINEL_PREV_HASH_HEX`) so "empty log" is a deterministic, well-known starting point.
 - `thisEntryHashHex` — SHA-256 over the canonical bytes of the entry plus `prevEntryHashHex`.
 - `entrySignatureBase64` — `ReceiptSigner.sign(thisEntryHashHex.getBytes(UTF_8))`. In production the signer uses the NCA's organisation-certificate-backed signing key — the certificate the NCA uses for ordinary administrative signing of supervisory acts. In the reference build the signer is the `EphemeralReceiptSigner` (clearly marked as such — see `THREAT_MODEL.md`).
 
@@ -667,25 +671,34 @@ Spring configuration:
 ```yaml
 gatekeeper:
   audit:
-    # JSON Lines file path; written with O_APPEND and fsynced on every append.
+    # JSON Lines file path. Each append opens the file with RandomAccessFile
+    # in "rwd" mode, seeks to the current length, writes, and calls
+    # getFD().sync() before returning — not O_APPEND; the seek is what makes
+    # the write an append, and the in-process append lock is what makes
+    # concurrent appends safe.
     path: ${GATEKEEPER_AUDIT_PATH:./audit-log.jsonl}
     # DORA Regulation (EU) 2022/2554 Article 28(6) minimum retention.
     retention-years: 5
+    # How long a chain-integrity result is served before it is recomputed.
+    # verifyChainIntegrity() is O(chain length) with one signature
+    # verification per entry, so GET /v1/gatekeeper/health serves a cached
+    # answer plus the instant it was computed.
+    integrity-check-interval-seconds: ${GATEKEEPER_INTEGRITY_CHECK_INTERVAL_SECONDS:300}
 ```
 
 A deployer who wants archival retention beyond the live-file lifetime configures `path` as a symlink that rotates periodically, and ensures backup procedures preserve the chain head across rotations.
 
 ### Gatekeeper public endpoints
 
-These endpoints are published unauthenticated (or under the same mTLS policy as the verification endpoints; see `SecurityConfig`) so that any relying party can verify gatekeeper-signed evidence retroactively.
+`GET /v1/gatekeeper/keys` and `GET /v1/gatekeeper/anchor` are published unauthenticated so that any relying party can verify gatekeeper-signed evidence retroactively without holding a client certificate. `GET /v1/gatekeeper/health` is not: it reports operational state rather than evidence, and requires the `SUPERVISOR` role (see `SecurityConfig`). All three are rate limited under the registry bucket.
 
 - **`GET /v1/gatekeeper/keys`** — returns the active and retired signing certificates with SHA-256 fingerprints. Operators paste this list into the financial entity's `swish.gatekeeper.trusted-keys` configuration (or a supervisory tool's equivalent trust store) so receipts signed under any historically active key remain verifiable for the DORA Regulation (EU) 2022/2554 Article 28(6) retention window. Backed by `GatekeeperKeyDirectory`.
-- **`GET /v1/gatekeeper/anchor`** — returns the current chain-head, signed. The body carries `headSequenceNumber`, `headHashHex`, `headTimestamp`, `headSignatureBase64`, and `activeSigningKeyFingerprintHex`. The signature is computed over the canonical bytes of the head entry (`AuditEntry.canonicalBytesForSignature`). A supervisor or relying party publishes this anchor periodically to a public commitment — for instance, posting the daily anchor JSON on Finansinspektionen's web site, or anchoring the head hash in a transparency log. The published anchor commits the gatekeeper to the audit content as of that timestamp, making subsequent retroactive rewriting detectable.
-- **`GET /v1/gatekeeper/health`** — returns `auditLogReadable`, `chainIntact`, `headSequenceNumber`, `headTimestamp`, `size`, `activeSigningKeyFingerprintHex`, and `signingMode`. Monitoring pipelines should fail closed if `chainIntact=false` or `signingMode=ephemeral` in production.
+- **`GET /v1/gatekeeper/anchor`** — returns the current chain-head, signed. The body carries `headSequenceNumber`, `headHashHex`, `headTimestamp`, `headSignatureBase64`, `signingKeyFingerprintHex` and `totalEntries`. The signature is computed over the canonical bytes of the head entry (`AuditEntry.canonicalBytesForSignature`). A supervisor or relying party publishes this anchor periodically to a public commitment — for instance, posting the daily anchor JSON on Finansinspektionen's web site, or anchoring the head hash in a transparency log. The published anchor commits the gatekeeper to the audit content as of that timestamp, making subsequent retroactive rewriting detectable.
+- **`GET /v1/gatekeeper/health`** — returns `auditLogReadable`, `chainIntact`, `chainCheckedAt`, `headSequenceNumber`, `headTimestamp`, `totalEntries`, `activeKeyFingerprint`, and `mode`. Monitoring pipelines should fail closed if `chainIntact=false` or `mode=ephemeral` in production. `chainIntact` is served from a cache recomputed at most once per `gatekeeper.audit.integrity-check-interval-seconds`, and `chainCheckedAt` says when it was computed: the chain walk is O(chain length) with one signature verification per entry, so running it per request made the endpoint a lever for unbounded work. A pipeline that needs a fresher answer lowers the interval rather than polling harder. Requires the `SUPERVISOR` role.
 
 ### Supervisory query endpoints
 
-These endpoints require authentication. With `gatekeeper.security.mtls.enabled=true` the standard NCA mTLS policy applies; the deployer's authorisation policy beyond mTLS — for instance role differentiation between supervisory inspectors and audit operators — is the `TODO-NCA` extension point in `SecurityConfig`.
+These endpoints require authentication *and* the `SUPERVISOR` role. With `gatekeeper.security.mtls.enabled=true`, `SecurityConfig` restricts `/v1/audit/**` and `GET /v1/attestation/*/registry/**` to `SUPERVISOR`, while `FE` clients reach only the verification protocol itself. Roles come from `RoleMappingProperties`: an ordered list of principal-pattern → role-set mappings under `gatekeeper.security.roles`, first match wins, with `default-roles: []` meaning deny by default. What the deployer supplies is the mapping — the patterns in `application-nca.yaml` are illustrative templates and must be replaced with the NCA's own client-certificate conventions (see `DEPLOYMENT.md` §4).
 
 - **`GET /v1/audit/witness/{verificationId}`** — single-event lookup. Returns `404` if the verification ID is unknown; returns the full `AuditEntry` otherwise. Used by an inspector who has been presented with a receipt by a financial entity and wants to verify the decision against the gatekeeper's own record.
 - **`GET /v1/audit/range?from=ISO&to=ISO`** — entries in a half-open `[from, to)` time window. The maximum window is 90 days (`AuditController.MAX_RANGE`) to bound the cost of a malicious or careless query. Returns entries in ascending sequence-number order.
@@ -715,17 +728,17 @@ mvn dependency:resolve
 mvn clean package
 
 # Reference / developer profile — permissive mTLS, ephemeral receipt signer
-java -jar target/gatekeeper-1.0.0.jar --spring.profiles.active=eba
+java -jar target/gatekeeper-1.4.0.jar --spring.profiles.active=eba
 
 # Production-shaped NCA profile — mTLS enforced, configured receipt signer
 # (see src/main/resources/application-nca.yaml for required environment
 # variables: keystore paths, passwords, signatory-rights mode)
-java -jar target/gatekeeper-1.0.0.jar --spring.profiles.active=nca
+java -jar target/gatekeeper-1.4.0.jar --spring.profiles.active=nca
 ```
 
 Both profiles share the same codebase; the profile selects between the reference-default beans (permissive defaults that emit WARN logs at startup so they cannot be deployed to production unnoticed) and the configured production beans. See `PEER_REVIEW_GUIDE.md` for the full configuration reference.
 
-**Swagger UI:** http://localhost:8080/swagger-ui.html (developer profile), or https://localhost:8443/swagger-ui.html (NCA profile over TLS)
+**Swagger UI** and the OpenAPI document are off in the `eba` and `nca` profiles and in the default configuration (`springdoc.*.enabled=false`); they have no run-time function and are kept out of the deployed surface. To browse the API locally add the `dev` profile: `--spring.profiles.active=eba,dev`, then http://localhost:8080/swagger-ui.html and http://localhost:8080/v3/api-docs.
 
 ## How to cite
 

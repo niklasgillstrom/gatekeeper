@@ -33,6 +33,17 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
 
     private final ConcurrentHashMap<String, RegistryEntry> entries = new ConcurrentHashMap<>();
 
+    /**
+     * Serialises {@link #confirm}. The nonce check and the nonce
+     * consumption have to be one atomic step: read-then-clear across two
+     * unsynchronised statements let two concurrent confirmations carrying
+     * the same nonce both read a non-null value and both succeed, which is
+     * exactly the single-use property the nonce exists to provide. One
+     * process-wide lock is enough — confirm is a once-per-issuance call,
+     * not a hot path.
+     */
+    private final Object confirmLock = new Object();
+
     public InMemoryApprovalRegistry() {
         log.info("InMemoryApprovalRegistry initialised (gatekeeper.registry.mode=in-memory). "
                 + "State is lost on restart; do not deploy to production. Set "
@@ -48,7 +59,8 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
                                   String supplierName,
                                   String hsmVendor,
                                   String hsmModel,
-                                  String countryCode) {
+                                  String countryCode,
+                                  String verificationPrincipal) {
         RegistryEntry entry = RegistryEntry.builder()
                 .verificationId(verificationId)
                 .confirmationNonce(confirmationNonce)
@@ -59,6 +71,7 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
                 .hsmVendor(hsmVendor)
                 .hsmModel(hsmModel)
                 .countryCode(countryCode)
+                .verificationPrincipal(verificationPrincipal)
                 .verificationTimestamp(Instant.now().toString())
                 .status(compliant ? RegistryStatus.VERIFIED_AND_ISSUED : RegistryStatus.REJECTED_NOT_ISSUED)
                 .certificateReceived(false)
@@ -79,6 +92,17 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
                                            boolean issued,
                                            String actualPublicKeyFingerprint,
                                            boolean publicKeyMatch) {
+        synchronized (confirmLock) {
+            return confirmLocked(verificationId, submittedNonce, issued,
+                    actualPublicKeyFingerprint, publicKeyMatch);
+        }
+    }
+
+    private Optional<RegistryEntry> confirmLocked(String verificationId,
+                                                  String submittedNonce,
+                                                  boolean issued,
+                                                  String actualPublicKeyFingerprint,
+                                                  boolean publicKeyMatch) {
         RegistryEntry entry = entries.get(verificationId);
         if (entry == null) {
             return Optional.empty();
@@ -97,6 +121,8 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
 
         // The nonce has now been spent. Clearing it makes confirm single-use:
         // a replayed request finds a null expectedNonce and is rejected above.
+        // Safe to clear here because there is nothing left that can fail:
+        // this implementation has no journal write to lose the transition to.
         entry.setConfirmationNonce(null);
 
         entry.setConfirmationTimestamp(Instant.now().toString());
