@@ -3,6 +3,7 @@ package eu.gillstrom.gatekeeper.service;
 import eu.gillstrom.gatekeeper.util.Fingerprints;
 
 import eu.gillstrom.gatekeeper.audit.AuditAppendRequest;
+import eu.gillstrom.gatekeeper.audit.AuditEntry;
 import eu.gillstrom.gatekeeper.audit.AuditLog;
 import eu.gillstrom.gatekeeper.audit.MtlsPrincipalResolver;
 import eu.gillstrom.gatekeeper.model.IssuanceConfirmationResponse.RegistryStatus;
@@ -12,13 +13,17 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import javax.security.auth.x500.X500Principal;
 import java.io.ByteArrayInputStream;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.security.spec.MGF1ParameterSpec;
+import java.security.spec.PSSParameterSpec;
 import java.util.Base64;
 import java.util.HexFormat;
 
@@ -62,6 +67,11 @@ public class SignatureVerificationService {
     private final MtlsPrincipalResolver principalResolver;
 
     private static final String DEFAULT_ALGORITHM = "SHA512withRSA";
+
+    private static final String RSASSA_PSS = "RSASSA-PSS";
+
+    private static final PSSParameterSpec PSS_PARAMETERS =
+            new PSSParameterSpec("SHA-512", "MGF1", MGF1ParameterSpec.SHA512, 64, 1);
 
     /**
      * Audit-log operation label for settlement-time verifications. Distinct
@@ -112,25 +122,51 @@ public class SignatureVerificationService {
      */
     public SignatureVerificationResponse verify(SignatureVerificationRequest request) {
         SignatureVerificationResponse response = verifyInternal(request);
-        appendAuditEntry(request, response);
+        AuditEntry entry = appendAuditEntry(request, response);
+        response.setAuditEntryHashHex(entry.thisEntryHashHex());
         return response;
     }
 
     private SignatureVerificationResponse verifyInternal(SignatureVerificationRequest request) {
-        if (request.getSigningCertificatePem() == null
-                || request.getSigningCertificatePem().isBlank()) {
-            return SignatureVerificationResponse.builder()
-                    .signatureValid(false)
-                    .compliant(false)
-                    .reason("MALFORMED_INPUT")
-                    .build();
+        String certificatePem = request.getSigningCertificatePem();
+        if (certificatePem == null || certificatePem.isBlank()) {
+            if (isBlank(request.getCertSerial()) || isBlank(request.getIssuerDn())) {
+                return SignatureVerificationResponse.builder()
+                        .signatureValid(false)
+                        .compliant(false)
+                        .reason("MALFORMED_INPUT")
+                        .build();
+            }
+            BigInteger serial;
+            X500Principal issuer;
+            try {
+                serial = parseSerialHex(request.getCertSerial());
+                issuer = new X500Principal(request.getIssuerDn());
+            } catch (IllegalArgumentException e) {
+                return SignatureVerificationResponse.builder()
+                        .signatureValid(false)
+                        .compliant(false)
+                        .reason("MALFORMED_INPUT")
+                        .build();
+            }
+            ApprovalRegistry.RegistryEntry certificateEntry =
+                    approvalRegistry.findByIssuedCertificate(serial, issuer).orElse(null);
+            if (certificateEntry == null
+                    || !storedCertificateMatches(certificateEntry.getIssuedCertificatePem(), serial, issuer)) {
+                return SignatureVerificationResponse.builder()
+                        .signatureValid(false)
+                        .compliant(false)
+                        .reason("CERT_NOT_FOUND")
+                        .build();
+            }
+            certificatePem = certificateEntry.getIssuedCertificatePem();
         }
 
         // Step 1: Parse certificate, extract public key.
         X509Certificate cert;
         PublicKey publicKey;
         try {
-            cert = parseCertificate(request.getSigningCertificatePem());
+            cert = parseCertificate(certificatePem);
             publicKey = cert.getPublicKey();
         } catch (Exception e) {
             log.warn("Settlement-time verify: certificate parse failure: {}", e.getMessage());
@@ -184,6 +220,9 @@ public class SignatureVerificationService {
                         .build();
             }
             Signature sig = Signature.getInstance(algorithm);
+            if (RSASSA_PSS.equals(algorithm)) {
+                sig.setParameter(PSS_PARAMETERS);
+            }
             sig.initVerify(publicKey);
             sig.update(digestBytes);
             signatureValid = sig.verify(signatureBytes);
@@ -277,13 +316,14 @@ public class SignatureVerificationService {
      * read from, so the settlement entry and the issuance entry share the
      * identifier. The relation is therefore many-to-one for
      * {@code SETTLEMENT_VERIFY} (one issuance, many settlements), unlike
-     * {@code VERIFY} / {@code CONFIRM}; supervisors reading settlement rows
+     * {@code VERIFY}; supervisors reading settlement rows
      * should page through {@link AuditLog#findInRange} rather than
      * {@link AuditLog#findByVerificationId}, which returns only the first
-     * match.</p>
+     * match. The entry's own {@code thisEntryHashHex} is returned to the
+     * caller as {@code auditEntryHashHex} and identifies it uniquely.</p>
      */
-    private void appendAuditEntry(SignatureVerificationRequest request,
-                                  SignatureVerificationResponse response) {
+    private AuditEntry appendAuditEntry(SignatureVerificationRequest request,
+                                        SignatureVerificationResponse response) {
         String verificationId = response.getAuditEntryId() == null
                 ? NO_REGISTRY_MATCH
                 : response.getAuditEntryId();
@@ -294,7 +334,7 @@ public class SignatureVerificationService {
                 sha256Base64(canonicalRequestBytes(request)),
                 sha256Base64(canonicalResponseBytes(response)),
                 response.isSignatureValid() && response.isCompliant());
-        auditLog.append(req);
+        return auditLog.append(req);
     }
 
     /**
@@ -346,6 +386,32 @@ public class SignatureVerificationService {
             // SHA-256 is mandated by the JCA; reaching this branch is a JRE
             // configuration bug, not a runtime condition we can recover from.
             throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
+    private static BigInteger parseSerialHex(String certSerial) {
+        String hex = certSerial.strip();
+        if (hex.startsWith("0x") || hex.startsWith("0X")) {
+            hex = hex.substring(2);
+        }
+        return new BigInteger(hex, 16);
+    }
+
+    private static boolean storedCertificateMatches(String pem, BigInteger serial, X500Principal issuer) {
+        if (pem == null) {
+            return false;
+        }
+        try {
+            X509Certificate stored = parseCertificate(pem);
+            return serial.equals(stored.getSerialNumber())
+                    && issuer.equals(stored.getIssuerX500Principal());
+        } catch (Exception e) {
+            log.warn("Settlement-time verify: stored certificate could not be parsed: {}", e.getMessage());
+            return false;
         }
     }
 

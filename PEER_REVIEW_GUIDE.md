@@ -114,10 +114,14 @@ A reviewer can independently reproduce the following claims about the hash-chain
 
 1. **Tamper detection at every row position.** `AppendOnlyFileAuditLogTest` writes a sequence of entries, then mutates one row at a time (first, middle, last) and asserts that `verifyChainIntegrity()` returns `false` in each case. The mutation is targeted at decision-relevant fields (`compliant`, `verificationId`, `requestDigestBase64`) so that a future reviewer can be confident that the chain covers what it claims to cover, not a ceremonial subset.
 2. **Persistence across process restart.** The test instantiates a second `AppendOnlyFileAuditLog` against the same file path, asserts that the chain is read back deterministically, and asserts that `verifyChainIntegrity()` returns `true` after restart.
-3. **fsync per append.** The append code path uses `FileChannel.force(true)` after every write. The test exercises this by appending, killing the in-process log, and re-reading from disk; the entry is present.
+3. **fsync per append.** The append code path opens the file with `RandomAccessFile` in `"rwd"` mode and calls `getFD().sync()` after every write. The test exercises this by appending, killing the in-process log, and re-reading from disk; the entry is present.
 4. **Sequence-number monotonicity.** `AuditEntry`'s record-constructor rejects sequence numbers `< 1`, and the log itself increments strictly monotonically.
 
 These four properties together substantiate the DORA Regulation (EU) 2022/2554 Article 28(6) retention claim — the audit trail kept for 5 years is not merely persisted, it is verifiably untampered.
+
+### End-to-end test across the three repositories
+
+`e2e/` starts the built gatekeeper, hsm and railgate jars on loopback ports and drives the real HTTP flow: Steps 2–7 with the real Yubico and Securosys attestation fixtures, and settlement both directly and through railgate. It is not part of `mvn verify`; clone hsm and railgate next to this repository, build all three, then run `e2e/run.sh`. `e2e/README.md` lists what it proves and what it cannot prove locally (the hsm issuance path needs a BankID signature, an allowed settlement needs a signature from the attested HSM key).
 
 ---
 
@@ -152,7 +156,7 @@ Reviewer takeaway: the gatekeeper verifies attestations deterministically agains
 | `gatekeeper.signing.keystore-path` | unset | `/etc/gatekeeper/signing.p12` (or secrets-manager path) | `ConfiguredReceiptSigner.java` |
 | `gatekeeper.signing.keystore-password` | unset | pulled from Spring secrets | `ConfiguredReceiptSigner.java` |
 | `gatekeeper.signing.key-alias` | unset | site-specific | `ConfiguredReceiptSigner.java` |
-| `gatekeeper.signing.algorithm` | `SHA256withRSA` (common sensible default) | match certificate (`SHA384withECDSA` for EC P-384, etc.) | `ConfiguredReceiptSigner.java` |
+| `gatekeeper.signing.algorithm` | `SHA256withRSA` (common sensible default) | match certificate (`SHA384withECDSA` for EC P-384, etc.) | `ConfiguredReceiptSigner.java`; `AppendOnlyFileAuditLog.java` verifies audit-entry signatures with the same algorithm |
 | `gatekeeper.security.mtls.enabled` | `false` (matchIfMissing) — startup emits WARN | `true` in any NCA/EBA deployment | `SecurityConfig.java` |
 | `gatekeeper.security.mtls.principal-regex` | `CN=(.*?)(?:,|$)` | site-specific NCA credential format | `SecurityConfig.java` |
 | `server.ssl.trust-store` | unset | path to NCA-issued client-CA bundle | Spring Boot / Tomcat connector |
@@ -195,7 +199,7 @@ Not closed by any of the above: the reference build still defaults to `Ephemeral
 ### `ApprovalRegistry` is in-memory (High for production)
 
 - **Risk.** Process restart loses all in-memory `ApprovalRegistry` records. The hash-chained `AppendOnlyFileAuditLog` is the durable side of the picture; the in-memory `ApprovalRegistry` exists for fast read-side state during the lifetime of a verification session.
-- **Mitigation in reference.** The decision-relevant facts (verify event, confirm event, public key fingerprints, principal) are written to `AppendOnlyFileAuditLog` synchronously on every state change, and the hash chain plus per-entry signature provide tamper-evidence even if the in-memory map is mutated. After a restart, supervisory queries served from `/v1/audit/...` reflect the durable state.
+- **Mitigation in reference.** A verify event and a confirm event, with principal, outcome bit and request and receipt digests, are written to `AppendOnlyFileAuditLog` synchronously on every state change, and the hash chain plus per-entry signature provide tamper-evidence for those entries even if the in-memory map is mutated. Public-key fingerprints, the registry status and the stored certificate are not in the audit log; they are persisted only by `AppendOnlyFileApprovalRegistry`, whose journal is not tamper-evident (`THREAT_MODEL.md`, Tampering). After a restart, supervisory queries served from `/v1/audit/...` reflect the durable state.
 - **Close in production.** Replace `ApprovalRegistry` with a PostgreSQL-backed registry that derives state from the audit log on startup; the hash-chained log remains the canonical record.
 
 ### Marvell TLV parser is speculative (High)
@@ -220,8 +224,8 @@ Not closed by any of the above: the reference build still defaults to `Ephemeral
 ### Step-7 confirmation replay (Medium)
 
 - **Risk.** An attacker who knows a `verificationId` can flood the gatekeeper with confirmations.
-- **Mitigation in reference.** `VerificationService.confirmIssuance()` requires the submitted issuance certificate to (a) chain to an issuer CA in `IssuerCaValidator`'s trust bundle, and (b) have a public key matching the attested key's fingerprint. This prevents arbitrary-certificate substitution. Replay without certificate possession is still possible.
-- **Close in production.** Bind the confirmation to a server-issued nonce (or to the mTLS-authenticated principal) and reject reuse.
+- **Mitigation in reference.** `VerificationService.confirmIssuance()` requires the submitted issuance certificate to (a) chain to an issuer CA in `IssuerCaValidator`'s trust bundle, and (b) have a public key matching the attested key's fingerprint. Since 1.4.0 the confirmation is also bound to a server-issued single-use nonce, consumed atomically, and — with mTLS enabled — to the principal that performed the verification. A replayed confirmation fails the nonce check and, since 1.5.0, is written to the hash-chained audit log as `ANOMALY_NONCE_MISMATCH`.
+- **Residual.** With mTLS disabled there is no principal binding; the nonce still prevents reuse.
 
 ### Forward-secure key rotation and RFC 3161 anchoring not implemented (Medium — Article 2 §6.3 scope)
 
@@ -239,7 +243,7 @@ Not closed by any of the above: the reference build still defaults to `Ephemeral
 | DORA Regulation (EU) 2022/2554 Article 17 (incident reporting windows) | Receipt + `ApprovalRegistry` entries carry the `producedAt` timestamp needed to populate DORA Article 17 timelines; the hash-chained audit log preserves the full event stream |
 | DORA Regulation (EU) 2022/2554 Article 19 (substantial incident reports) | Article 2 §8.6 uses the signed receipt stream as the evidence substrate; the audit-export endpoint `/v1/audit/export` is the dump format an investigator hands to the supervisor |
 | DORA Regulation (EU) 2022/2554 Article 28 (contractual arrangements) | Verification occurs at certificate issuance, not per-transaction — matches Article 1's claim that the financial entity retains full verification responsibility irrespective of outsourcing |
-| DORA Regulation (EU) 2022/2554 Article 28(6) (5-year retention with discoverable verifiability) | `AppendOnlyFileAuditLog` provides hash-chained append-only retention; `gatekeeper.audit.retention-years` defaults to 5; `GET /v1/gatekeeper/keys` and `GET /v1/gatekeeper/anchor` make retroactive verifiability operational |
+| DORA Regulation (EU) 2022/2554 Article 28(6) (5-year retention with discoverable verifiability) | `AppendOnlyFileAuditLog` provides hash-chained append-only retention and never prunes; `gatekeeper.audit.retention-years` is set to 5 in `application.yaml` but no code reads it, so retention is an operational procedure (`SUPERVISORY_OPERATIONS.md` §5.3); `GET /v1/gatekeeper/keys` and `GET /v1/gatekeeper/anchor` make retroactive verifiability operational |
 | DORA Regulation (EU) 2022/2554 Article 29 (concentration risk; "fully monitor outsourced functions") | Supervisory batch endpoint at `/v1/attestation/{countryCode}/verify/batch` aggregates compliance statistics across a population for Article 29 oversight; rate-limiting gap |
 | DORA Regulation (EU) 2022/2554 Article 30(2)(c) (data protection provisions) | Article 2 §4.2: contractual HSM requirement without verification does not satisfy Article 30(2)(c); this gatekeeper is the verification mechanism that closes the gap |
 | DORA Regulation (EU) 2022/2554 Article 32 (Oversight Forum) | The audit log + anchor publication is the evidence substrate the Oversight Forum consumes when assessing concentration risk and exploring mitigants |

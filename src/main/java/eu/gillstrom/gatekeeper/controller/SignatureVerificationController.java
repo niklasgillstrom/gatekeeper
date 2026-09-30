@@ -65,11 +65,14 @@ public class SignatureVerificationController {
     @Operation(
             summary = "Verify settlement-time signature against gatekeeper audit",
             description = """
-                    Receives {certSerial, issuerDn, digestHex, signatureBase64,
-                    signingCertificatePem} and returns whether the signature
-                    cryptographically verifies and whether the underlying
-                    certificate corresponds to a compliant gatekeeper audit
-                    entry.
+                    Receives {certSerial, issuerDn, digestHex, signatureBase64}
+                    and optionally signingCertificatePem and algorithm, and
+                    returns whether the signature cryptographically verifies
+                    and whether the underlying certificate corresponds to a
+                    compliant gatekeeper audit entry. Without
+                    signingCertificatePem the certificate stored at Step 7 is
+                    looked up by (certSerial, issuerDn): certSerial in hex,
+                    issuerDn compared as an X.500 name.
 
                     The verifier mirrors the production signing flow exactly:
                     Signature.getInstance("SHA512withRSA").initVerify(publicKey).update(digest).verify(signature)

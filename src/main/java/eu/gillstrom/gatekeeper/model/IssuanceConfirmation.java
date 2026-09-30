@@ -59,10 +59,12 @@ public class IssuanceConfirmation {
     private boolean issued;
 
     /**
-     * If issued: the full signing certificate in PEM format.
+     * If issued: the full signing certificate in PEM format, optionally
+     * followed by the intermediate CA certificates that issued it.
      * EBA extracts the public key and verifies it matches the
      * attestation evidence approved in Step 3.
-     * Null if not issued.
+     * Null if not issued; null or blank with {@code issued=true} is an
+     * anomaly.
      */
     @Size(max = MAX_CERT_PEM_LENGTH, message = "signingCertificatePem exceeds the maximum accepted length")
     private String signingCertificatePem;

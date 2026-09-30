@@ -176,10 +176,11 @@ public class VerificationController {
             // Step-7 replay attempt — nonce did not match the one bound at
             // verify time. Return 400 with a structured body rather than
             // 500; the FE has supplied a malformed (or replayed) request.
-            // The registry has already logged the mismatch at WARN.
+            // The registry has already logged the mismatch at WARN and the
+            // service has appended a CONFIRM audit entry for it.
             IssuanceConfirmationResponse rejection = new IssuanceConfirmationResponse();
             rejection.setVerificationId(confirmation.getVerificationId());
-            rejection.setRegistryStatus(IssuanceConfirmationResponse.RegistryStatus.ANOMALY_PUBLIC_KEY_MISMATCH);
+            rejection.setRegistryStatus(IssuanceConfirmationResponse.RegistryStatus.ANOMALY_NONCE_MISMATCH);
             rejection.setAnomalies(java.util.List.of(
                     "Confirmation nonce does not match the nonce bound to verificationId at verify time. "
                   + "Possible Step-7 replay attempt; the gatekeeper has logged this as a security event."));

@@ -1,9 +1,20 @@
 package eu.gillstrom.gatekeeper.service;
 
+import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.NoArgsConstructor;
 import eu.gillstrom.gatekeeper.model.IssuanceConfirmationResponse.RegistryStatus;
 
+import javax.security.auth.x500.X500Principal;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.security.cert.CertificateEncodingException;
+import java.security.cert.X509Certificate;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.util.Base64;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
@@ -109,12 +120,28 @@ public interface ApprovalRegistry {
      * {@link NonceMismatchException} means "the nonce did not match" —
      * two distinct outcomes so the controller can answer 404 and 400
      * respectively.</p>
+     *
+     * <p>{@code issuedCertificate} is stored on the entry when the
+     * confirmation ends in {@code VERIFIED_AND_ISSUED}, so that
+     * {@link #findByIssuedCertificate(BigInteger, X500Principal)} can
+     * resolve a settlement-time request that carries only the certificate
+     * serial and issuer DN. {@code null} stores nothing.</p>
      */
     Optional<RegistryEntry> confirm(String verificationId,
                                     String submittedNonce,
                                     boolean issued,
                                     String actualPublicKeyFingerprint,
-                                    boolean publicKeyMatch) throws NonceMismatchException;
+                                    boolean publicKeyMatch,
+                                    IssuedCertificate issuedCertificate) throws NonceMismatchException;
+
+    default Optional<RegistryEntry> confirm(String verificationId,
+                                            String submittedNonce,
+                                            boolean issued,
+                                            String actualPublicKeyFingerprint,
+                                            boolean publicKeyMatch) throws NonceMismatchException {
+        return confirm(verificationId, submittedNonce, issued, actualPublicKeyFingerprint,
+                publicKeyMatch, null);
+    }
 
     /**
      * Thrown by {@link #confirm} when the submitted nonce does not match
@@ -208,11 +235,62 @@ public interface ApprovalRegistry {
         return Optional.empty();
     }
 
+    default Optional<RegistryEntry> findByIssuedCertificate(BigInteger serial, X500Principal issuer) {
+        return Optional.empty();
+    }
+
+    static boolean issuedCertificateMatches(RegistryEntry entry, BigInteger serial, X500Principal issuer) {
+        if (serial == null || issuer == null
+                || entry.getIssuedCertificateSerial() == null
+                || entry.getIssuedCertificateIssuerDn() == null) {
+            return false;
+        }
+        try {
+            return serial.equals(new BigInteger(entry.getIssuedCertificateSerial(), 16))
+                    && issuer.equals(new X500Principal(entry.getIssuedCertificateIssuerDn()));
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    static Comparator<RegistryEntry> recency() {
+        return Comparator
+                .comparing((RegistryEntry e) -> parseInstant(e.getVerificationTimestamp()),
+                        Comparator.nullsFirst(Comparator.<Instant>naturalOrder()))
+                .thenComparing((RegistryEntry e) -> parseInstant(e.getConfirmationTimestamp()),
+                        Comparator.nullsFirst(Comparator.<Instant>naturalOrder()));
+    }
+
+    private static Instant parseInstant(String timestamp) {
+        if (timestamp == null || timestamp.isBlank()) {
+            return null;
+        }
+        try {
+            return Instant.parse(timestamp);
+        } catch (DateTimeParseException e) {
+            return null;
+        }
+    }
+
     /** Compliance statistics for a given country code. */
     ComplianceStats getStats(String countryCode);
 
     /** Aggregate compliance statistics. */
     record ComplianceStats(long total, long compliant, long anomalies, double complianceRate) {}
+
+    record IssuedCertificate(String pem, String serialHex, String issuerDn) {
+
+        public static IssuedCertificate of(X509Certificate certificate) throws CertificateEncodingException {
+            String pem = "-----BEGIN CERTIFICATE-----\n"
+                    + Base64.getMimeEncoder(64, "\n".getBytes(StandardCharsets.US_ASCII))
+                            .encodeToString(certificate.getEncoded())
+                    + "\n-----END CERTIFICATE-----\n";
+            return new IssuedCertificate(
+                    pem,
+                    certificate.getSerialNumber().toString(16),
+                    certificate.getIssuerX500Principal().getName());
+        }
+    }
 
     /**
      * A single entry in the approval registry.
@@ -238,6 +316,8 @@ public interface ApprovalRegistry {
      */
     @Data
     @Builder(toBuilder = true)
+    @NoArgsConstructor
+    @AllArgsConstructor
     class RegistryEntry {
         private String verificationId;
         /**
@@ -280,5 +360,8 @@ public interface ApprovalRegistry {
         private String confirmationTimestamp;
         private RegistryStatus status;
         private boolean certificateReceived;
+        private String issuedCertificatePem;
+        private String issuedCertificateSerial;
+        private String issuedCertificateIssuerDn;
     }
 }

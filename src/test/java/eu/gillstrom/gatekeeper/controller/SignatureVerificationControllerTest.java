@@ -238,7 +238,8 @@ class SignatureVerificationControllerTest {
 
         @Override
         public Optional<RegistryEntry> confirm(String verificationId, String submittedNonce,
-                boolean issued, String actualPublicKeyFingerprint, boolean publicKeyMatch) {
+                boolean issued, String actualPublicKeyFingerprint, boolean publicKeyMatch,
+                IssuedCertificate issuedCertificate) {
             throw new UnsupportedOperationException();
         }
 

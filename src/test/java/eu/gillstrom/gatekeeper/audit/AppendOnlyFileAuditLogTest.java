@@ -3,17 +3,32 @@ package eu.gillstrom.gatekeeper.audit;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.cert.X509v3CertificateBuilder;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import eu.gillstrom.gatekeeper.service.GatekeeperKeyDirectory;
+import eu.gillstrom.gatekeeper.signing.ConfiguredReceiptSigner;
 import eu.gillstrom.gatekeeper.signing.EphemeralReceiptSigner;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.KeyStore;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.Date;
 import java.util.List;
 import java.util.Optional;
 
@@ -323,5 +338,132 @@ class AppendOnlyFileAuditLogTest {
         assertThat(second.size()).isEqualTo(first.size());
         assertThat(second.head().get().thisEntryHashHex())
                 .isEqualTo(first.head().get().thisEntryHashHex());
+    }
+
+    private static void flipComplianceOfLine(Path file, int index) throws IOException {
+        List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.registerModule(new JavaTimeModule());
+        ObjectNode node = (ObjectNode) mapper.readTree(lines.get(index));
+        node.put("compliant", !node.get("compliant").asBoolean());
+        lines.set(index, mapper.writeValueAsString(node));
+        Files.write(file, lines, StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void verifyChainIntegrityDetectsTamperingOfTheFileWhileRunning() throws IOException {
+        Path file = tempDir.resolve("running-tamper.jsonl");
+        AppendOnlyFileAuditLog log = newLog(file);
+        log.append(sampleRequest("a", true, "VERIFY"));
+        log.append(sampleRequest("b", true, "VERIFY"));
+        log.append(sampleRequest("c", true, "VERIFY"));
+        assertThat(log.verifyChainIntegrity()).isTrue();
+
+        flipComplianceOfLine(file, 1);
+
+        assertThat(log.verifyChainIntegrity()).isFalse();
+    }
+
+    @Test
+    void verifyChainIntegrityDetectsTruncationOfTheFileWhileRunning() throws IOException {
+        Path file = tempDir.resolve("running-truncate.jsonl");
+        AppendOnlyFileAuditLog log = newLog(file);
+        log.append(sampleRequest("a", true, "VERIFY"));
+        log.append(sampleRequest("b", true, "VERIFY"));
+        log.append(sampleRequest("c", true, "VERIFY"));
+        assertThat(log.verifyChainIntegrity()).isTrue();
+
+        List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+        Files.write(file, lines.subList(0, 1), StandardCharsets.UTF_8);
+
+        assertThat(log.verifyChainIntegrity()).isFalse();
+    }
+
+    @Test
+    void cachedIntegrityStatusDetectsTamperingOfTheFileWhileRunning() throws IOException {
+        Path file = tempDir.resolve("running-cached-tamper.jsonl");
+        AppendOnlyFileAuditLog log = new AppendOnlyFileAuditLog(file.toString(), signer, 0);
+        log.initialise();
+        log.append(sampleRequest("a", true, "VERIFY"));
+        log.append(sampleRequest("b", true, "VERIFY"));
+        assertThat(log.cachedIntegrityStatus().intact()).isTrue();
+
+        flipComplianceOfLine(file, 0);
+
+        assertThat(log.cachedIntegrityStatus().intact()).isFalse();
+    }
+
+    @Test
+    void chainSignedWithSha384WithEcdsaIsIntact() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
+        kpg.initialize(384);
+        KeyPair kp = kpg.generateKeyPair();
+        X500Name subject = new X500Name("CN=TEST-NCA-SEAL");
+        long now = System.currentTimeMillis();
+        X509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
+                subject, BigInteger.valueOf(now), new Date(now - 60_000L), new Date(now + 3600_000L),
+                subject, kp.getPublic());
+        X509Certificate cert = new JcaX509CertificateConverter().getCertificate(
+                builder.build(new JcaContentSignerBuilder("SHA384withECDSA").build(kp.getPrivate())));
+        KeyStore keyStore = KeyStore.getInstance("PKCS12");
+        keyStore.load(null, null);
+        keyStore.setKeyEntry("seal", kp.getPrivate(), "changeit".toCharArray(), new Certificate[] {cert});
+        Path keystorePath = tempDir.resolve("seal.p12");
+        try (OutputStream out = Files.newOutputStream(keystorePath)) {
+            keyStore.store(out, "changeit".toCharArray());
+        }
+        ConfiguredReceiptSigner ecSigner = new ConfiguredReceiptSigner(
+                keystorePath.toString(), "changeit", "seal", "changeit", "SHA384withECDSA");
+
+        Path file = tempDir.resolve("sha384-ecdsa.jsonl");
+        AppendOnlyFileAuditLog log = new AppendOnlyFileAuditLog(file.toString(), ecSigner);
+        log.initialise();
+        log.append(sampleRequest("1", true, "VERIFY"));
+        log.append(sampleRequest("2", false, "CONFIRM"));
+
+        assertThat(log.verifyChainIntegrity()).isTrue();
+        AppendOnlyFileAuditLog reloaded = new AppendOnlyFileAuditLog(file.toString(), ecSigner);
+        reloaded.initialise();
+        assertThat(reloaded.verifyChainIntegrity()).isTrue();
+    }
+
+    @Test
+    void chainStaysIntactAfterKeyRotationWithTheOldCertificateRetired() {
+        Path file = tempDir.resolve("rotation.jsonl");
+        EphemeralReceiptSigner oldSigner = new EphemeralReceiptSigner(2048);
+        AppendOnlyFileAuditLog beforeRotation = new AppendOnlyFileAuditLog(file.toString(), oldSigner);
+        beforeRotation.initialise();
+        beforeRotation.append(sampleRequest("1", true, "VERIFY"));
+        beforeRotation.append(sampleRequest("2", true, "CONFIRM"));
+
+        EphemeralReceiptSigner newSigner = new EphemeralReceiptSigner(2048);
+        GatekeeperKeyDirectory keyDirectory =
+                new GatekeeperKeyDirectory(newSigner, oldSigner.getSigningCertificatePem());
+        keyDirectory.initialise();
+        AppendOnlyFileAuditLog afterRotation =
+                new AppendOnlyFileAuditLog(file.toString(), newSigner, 0, keyDirectory);
+        afterRotation.initialise();
+        afterRotation.append(sampleRequest("3", true, "VERIFY"));
+
+        assertThat(afterRotation.verifyChainIntegrity()).isTrue();
+        assertThat(afterRotation.cachedIntegrityStatus().intact()).isTrue();
+    }
+
+    @Test
+    void chainSignedUnderAKeyThatIsNeitherActiveNorRetiredIsNotIntact() {
+        Path file = tempDir.resolve("rotation-unlisted.jsonl");
+        EphemeralReceiptSigner oldSigner = new EphemeralReceiptSigner(2048);
+        AppendOnlyFileAuditLog beforeRotation = new AppendOnlyFileAuditLog(file.toString(), oldSigner);
+        beforeRotation.initialise();
+        beforeRotation.append(sampleRequest("1", true, "VERIFY"));
+
+        EphemeralReceiptSigner newSigner = new EphemeralReceiptSigner(2048);
+        GatekeeperKeyDirectory keyDirectory = new GatekeeperKeyDirectory(newSigner, "");
+        keyDirectory.initialise();
+        AppendOnlyFileAuditLog afterRotation =
+                new AppendOnlyFileAuditLog(file.toString(), newSigner, 0, keyDirectory);
+        afterRotation.initialise();
+
+        assertThat(afterRotation.verifyChainIntegrity()).isFalse();
     }
 }

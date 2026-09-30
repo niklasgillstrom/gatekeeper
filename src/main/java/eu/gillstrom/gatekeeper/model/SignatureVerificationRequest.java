@@ -25,12 +25,15 @@ import lombok.NoArgsConstructor;
  *
  * <p>Two paths are supported for locating the certificate's public key:
  * <ul>
- *   <li>If {@code signingCertificatePem} is supplied, it is used directly
- *       (the supervisor still cross-checks {@code certSerial} against the
- *       audit log to confirm compliance).</li>
+ *   <li>If {@code signingCertificatePem} is supplied, it is used directly;
+ *       {@code certSerial} and {@code issuerDn} are then not consulted.</li>
  *   <li>If absent, gatekeeper looks up the certificate stored at Step-7
- *       confirmation under {@code (certSerial, issuerDn)}. If no such
- *       certificate exists, the response is {@code CERT_NOT_FOUND} —
+ *       confirmation under {@code (certSerial, issuerDn)}: {@code certSerial}
+ *       is hexadecimal, case-insensitive, with an optional {@code 0x}
+ *       prefix, and {@code issuerDn} is compared as an
+ *       {@link javax.security.auth.x500.X500Principal}. Only confirmations
+ *       that ended in {@code VERIFIED_AND_ISSUED} store a certificate. If no
+ *       such certificate exists, the response is {@code CERT_NOT_FOUND} —
  *       a circumvention signal in itself, since a settlement-time
  *       signature for an unknown cert serial cannot have come from a
  *       gatekeeper-audited issuance.</li>
@@ -59,7 +62,8 @@ public class SignatureVerificationRequest {
      *       base64; 4096 covers that with a wide margin.</li>
      *   <li>An X.509 certificate in PEM is 1–3 KB; 16 KiB is generous.</li>
      *   <li>An X.500 issuer DN is bounded by RFC 5280 practice at a few
-     *       hundred characters; a serial number is a big integer in decimal.</li>
+     *       hundred characters; a serial number is a big integer in
+     *       hexadecimal (at most 20 octets under RFC 5280).</li>
      * </ul>
      */
     public static final int MAX_DIGEST_HEX_LENGTH = 256;
@@ -97,9 +101,11 @@ public class SignatureVerificationRequest {
     /**
      * Optional algorithm identifier. Defaults to RSA-PKCS#1 v1.5 with
      * SHA-512 (the algorithm used by the reference Swish utbetalning
-     * signing flow). Other supported values:
-     * {@code SHA512_WITH_RSA_PSS}, {@code SHA384_WITH_RSA},
-     * {@code SHA256_WITH_RSA}.
+     * signing flow). Other supported values: {@code SHA384withRSA},
+     * {@code SHA256withRSA}, {@code SHA256withECDSA},
+     * {@code SHA384withECDSA}, {@code SHA512withECDSA} and
+     * {@code RSASSA-PSS}, the last verified with SHA-512, MGF1 with
+     * SHA-512, a 64-byte salt and trailer field 1.
      *
      * <p>Bounded independently of the whitelist in
      * {@code SignatureVerificationService}: the whitelist rejects an

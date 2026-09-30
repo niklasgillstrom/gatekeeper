@@ -36,14 +36,17 @@ import java.util.UUID;
  *
  * <p>Endpoints under {@code /v1/audit}:</p>
  * <ul>
- *   <li>{@code GET /witness/{verificationId}} — single entry by
- *       verification ID. {@code 404} if absent.</li>
+ *   <li>{@code GET /witness/{verificationId}} — the earliest entry with
+ *       that verification ID, which for an issuance is the {@code VERIFY}
+ *       or {@code BATCH_VERIFY} entry. {@code 404} if absent.</li>
  *   <li>{@code GET /range?from=...&to=...} — entries in a half-open
  *       time window. The maximum allowed window is 90 days to bound the
  *       resource cost of a malicious or careless query.</li>
  *   <li>{@code GET /entity/{principal}} — entries for a given mTLS
- *       principal. {@code principal} is URL-decoded so DNs containing
- *       commas or equals can be passed.</li>
+ *       principal, compared exactly with the value recorded at append:
+ *       the capture group of {@code gatekeeper.security.mtls.principal-regex}
+ *       (by default the CN value), or the full subject DN when the regex
+ *       does not match. {@code principal} is URL-decoded.</li>
  *   <li>{@code GET /export?from=...&to=...&inspectionId=...} —
  *       packaged, signed export for a supervisory inspection.</li>
  * </ul>
@@ -86,8 +89,10 @@ public class AuditController {
 
     @GetMapping("/witness/{verificationId}")
     @Operation(
-        summary = "Single audit entry by verification ID",
-        description = "Returns 404 if the verification ID is unknown.")
+        summary = "Earliest audit entry with a verification ID",
+        description = "Returns the VERIFY or BATCH_VERIFY entry of an issuance; CONFIRM and "
+                + "SETTLEMENT_VERIFY entries with the same ID are listed by /range. "
+                + "Returns 404 if the verification ID is unknown.")
     public ResponseEntity<AuditEntry> findEntry(@PathVariable String verificationId) {
         Optional<AuditEntry> entry = auditLog.findByVerificationId(verificationId);
         return entry.map(ResponseEntity::ok)
@@ -111,8 +116,9 @@ public class AuditController {
     @GetMapping("/entity/{principal}")
     @Operation(
         summary = "Audit entries for a given mTLS principal",
-        description = "Principal is URL-decoded; pass DNs as URL-encoded values "
-                + "(e.g. CN%3Dswish%2CO%3DGetSwish).")
+        description = "Principal is URL-decoded and compared exactly with the recorded "
+                + "principal: the value captured by gatekeeper.security.mtls.principal-regex "
+                + "(by default the CN value, e.g. swishTL), not the full DN.")
     public ResponseEntity<List<AuditEntry>> findByEntity(@PathVariable String principal) {
         String decoded = URLDecoder.decode(principal, StandardCharsets.UTF_8);
         return ResponseEntity.ok(auditLog.findByPrincipal(decoded));

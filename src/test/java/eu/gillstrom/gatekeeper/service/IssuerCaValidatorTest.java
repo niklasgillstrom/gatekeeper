@@ -4,9 +4,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import eu.gillstrom.gatekeeper.testsupport.TestPki;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.cert.X509Certificate;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -59,5 +62,62 @@ class IssuerCaValidatorTest {
     void nullCertificateReturnsFalse() {
         IssuerCaValidator validator = new IssuerCaValidator("");
         assertThat(validator.validate(null)).isFalse();
+    }
+
+    @Test
+    void leafValidatesAgainstTheRootWhenItsIntermediateIsSubmitted(@TempDir Path tmp) throws Exception {
+        KeyPair rootKp = TestPki.newRsaKeyPair(2048);
+        X509Certificate root = TestPki.selfSignedCa(rootKp, "TEST-ROOT");
+        KeyPair intermediateKp = TestPki.newRsaKeyPair(2048);
+        X509Certificate intermediate = TestPki.subordinateCa(
+                intermediateKp, "TEST-INTERMEDIATE", root, rootKp.getPrivate());
+        X509Certificate leaf = TestPki.endEntity(
+                TestPki.newRsaKeyPair(2048), "TEST-LEAF", intermediate, intermediateKp.getPrivate());
+        Path bundle = tmp.resolve("root-only.pem");
+        Files.writeString(bundle, TestPki.toPem(root), StandardCharsets.UTF_8);
+        IssuerCaValidator validator = new IssuerCaValidator(bundle.toString());
+
+        assertThat(validator.trustAnchorCount()).isEqualTo(1);
+        assertThat(validator.validateChain(List.of(leaf, intermediate))).isTrue();
+    }
+
+    @Test
+    void leafDoesNotValidateWhenItsIntermediateIsMissing(@TempDir Path tmp) throws Exception {
+        KeyPair rootKp = TestPki.newRsaKeyPair(2048);
+        X509Certificate root = TestPki.selfSignedCa(rootKp, "TEST-ROOT");
+        KeyPair intermediateKp = TestPki.newRsaKeyPair(2048);
+        X509Certificate intermediate = TestPki.subordinateCa(
+                intermediateKp, "TEST-INTERMEDIATE", root, rootKp.getPrivate());
+        X509Certificate leaf = TestPki.endEntity(
+                TestPki.newRsaKeyPair(2048), "TEST-LEAF", intermediate, intermediateKp.getPrivate());
+        Path bundle = tmp.resolve("root-only.pem");
+        Files.writeString(bundle, TestPki.toPem(root), StandardCharsets.UTF_8);
+        IssuerCaValidator validator = new IssuerCaValidator(bundle.toString());
+
+        assertThat(validator.validateChain(List.of(leaf))).isFalse();
+        assertThat(validator.validate(leaf)).isFalse();
+    }
+
+    @Test
+    void intermediateInTheBundleCompletesThePathWithoutBecomingATrustAnchor(@TempDir Path tmp)
+            throws Exception {
+        KeyPair rootKp = TestPki.newRsaKeyPair(2048);
+        X509Certificate root = TestPki.selfSignedCa(rootKp, "TEST-ROOT");
+        KeyPair intermediateKp = TestPki.newRsaKeyPair(2048);
+        X509Certificate intermediate = TestPki.subordinateCa(
+                intermediateKp, "TEST-INTERMEDIATE", root, rootKp.getPrivate());
+        X509Certificate leaf = TestPki.endEntity(
+                TestPki.newRsaKeyPair(2048), "TEST-LEAF", intermediate, intermediateKp.getPrivate());
+        Path bundle = tmp.resolve("root-and-intermediate.pem");
+        Files.writeString(bundle, TestPki.toPem(root) + TestPki.toPem(intermediate), StandardCharsets.UTF_8);
+        IssuerCaValidator validator = new IssuerCaValidator(bundle.toString());
+
+        assertThat(validator.trustAnchorCount()).isEqualTo(1);
+        assertThat(validator.validate(leaf)).isTrue();
+    }
+
+    @Test
+    void shippedBundleHasOneTrustAnchor() {
+        assertThat(new IssuerCaValidator("").trustAnchorCount()).isEqualTo(1);
     }
 }

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
@@ -15,8 +16,10 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.model.IssuanceConfirmationResponse.RegistryStatus;
 
+import javax.security.auth.x500.X500Principal;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -52,7 +55,13 @@ import java.util.stream.Collectors;
  *       {@code register(...)}. Carries the full initial entry payload.</li>
  *   <li><strong>{@code CONFIRM}</strong> — emitted by
  *       {@code confirm(...)}. Carries the confirmation outcome plus the
- *       {@code verificationId} key needed to apply it.</li>
+ *       {@code verificationId} key needed to apply it, the
+ *       {@code confirmationTimestamp}, and — when the
+ *       outcome is {@code VERIFIED_AND_ISSUED} — the issued certificate as
+ *       {@code issuedCertificatePem}, {@code issuedCertificateSerial} and
+ *       {@code issuedCertificateIssuerDn}. Lines written before 1.5.0 lack
+ *       those four fields and replay without a stored certificate and with
+ *       a {@code null} {@code confirmationTimestamp}.</li>
  * </ul>
  *
  * <p>On startup the journal is replayed in order: each {@code REGISTER}
@@ -134,9 +143,11 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
                             continue;
                         }
                         applyConfirmation(existing,
+                                op.path("confirmationTimestamp").asText(null),
                                 op.path("issued").asBoolean(),
                                 op.path("actualPublicKeyFingerprint").asText(null),
-                                op.path("publicKeyMatch").asBoolean());
+                                op.path("publicKeyMatch").asBoolean(),
+                                issuedCertificateFrom(op));
                         // A journalled CONFIRM is proof the nonce was spent,
                         // so replay must consume it too — otherwise a restart
                         // would make an already-used nonce valid again.
@@ -219,19 +230,21 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
      * defeats the single-use property. {@code appendOp} re-enters the same
      * lock.</p>
      *
-     * <p>The in-memory nonce is cleared only <em>after</em> the journal
-     * append has returned. Clearing it first meant that an I/O failure on
-     * the journal burned the nonce: the transition was never recorded, the
-     * caller got a 5xx and was told to retry, and the retry then failed the
-     * nonce check against a null expected value — the FE could never close
-     * the loop for that verificationId again.</p>
+     * <p>The in-memory transition is applied and the nonce cleared only
+     * <em>after</em> the journal append has returned. Clearing the nonce
+     * first meant that an I/O failure on the journal burned the nonce: the
+     * transition was never recorded, the caller got a 5xx and was told to
+     * retry, and the retry then failed the nonce check against a null
+     * expected value — the FE could never close the loop for that
+     * verificationId again.</p>
      */
     @Override
     public Optional<RegistryEntry> confirm(String verificationId,
                                            String submittedNonce,
                                            boolean issued,
                                            String actualPublicKeyFingerprint,
-                                           boolean publicKeyMatch) {
+                                           boolean publicKeyMatch,
+                                           IssuedCertificate issuedCertificate) {
         writeLock.lock();
         try {
             RegistryEntry entry = entries.get(verificationId);
@@ -252,21 +265,34 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
                 throw new NonceMismatchException(verificationId);
             }
 
-            // Apply the state transition to the in-memory entry first; then
-            // journal it. If journalling fails we let the exception propagate
-            // and the caller surfaces it as a 5xx so the FE retries — with
-            // the nonce still intact, because we have not cleared it yet.
-            applyConfirmation(entry, issued, actualPublicKeyFingerprint, publicKeyMatch);
-            appendOp(OP_CONFIRM, verificationId, mapper -> mapper
-                    .createObjectNode()
-                    .put("op", OP_CONFIRM)
-                    .put("verificationId", verificationId)
-                    .put("issued", issued)
-                    .put("actualPublicKeyFingerprint", actualPublicKeyFingerprint)
-                    .put("publicKeyMatch", publicKeyMatch));
+            // Journal the state transition first; then apply it to the
+            // in-memory entry. If journalling fails we let the exception
+            // propagate and the caller surfaces it as a 5xx so the FE
+            // retries — with the entry untouched and the nonce still intact.
+            String confirmationTimestamp = Instant.now().toString();
+            boolean storesCertificate = issuedCertificate != null
+                    && entry.isCompliant() && issued && publicKeyMatch;
+            appendOp(OP_CONFIRM, verificationId, mapper -> {
+                ObjectNode op = mapper
+                        .createObjectNode()
+                        .put("op", OP_CONFIRM)
+                        .put("verificationId", verificationId)
+                        .put("issued", issued)
+                        .put("actualPublicKeyFingerprint", actualPublicKeyFingerprint)
+                        .put("publicKeyMatch", publicKeyMatch)
+                        .put("confirmationTimestamp", confirmationTimestamp);
+                if (storesCertificate) {
+                    op.put("issuedCertificatePem", issuedCertificate.pem());
+                    op.put("issuedCertificateSerial", issuedCertificate.serialHex());
+                    op.put("issuedCertificateIssuerDn", issuedCertificate.issuerDn());
+                }
+                return op;
+            });
 
             // Durable now. The nonce is spent: a replay finds null and is
             // rejected by the check above.
+            applyConfirmation(entry, confirmationTimestamp, issued, actualPublicKeyFingerprint,
+                    publicKeyMatch, issuedCertificate);
             entry.setConfirmationNonce(null);
 
             return Optional.of(entry);
@@ -282,15 +308,22 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
      * the nonce because the journal proves the confirmation happened.
      */
     private void applyConfirmation(RegistryEntry entry,
+                                   String confirmationTimestamp,
                                    boolean issued,
                                    String actualPublicKeyFingerprint,
-                                   boolean publicKeyMatch) {
-        entry.setConfirmationTimestamp(Instant.now().toString());
+                                   boolean publicKeyMatch,
+                                   IssuedCertificate issuedCertificate) {
+        entry.setConfirmationTimestamp(confirmationTimestamp);
         entry.setCertificateReceived(issued);
 
         if (entry.isCompliant() && issued && publicKeyMatch) {
             entry.setStatus(RegistryStatus.VERIFIED_AND_ISSUED);
             entry.setActualPublicKeyFingerprint(actualPublicKeyFingerprint);
+            if (issuedCertificate != null) {
+                entry.setIssuedCertificatePem(issuedCertificate.pem());
+                entry.setIssuedCertificateSerial(issuedCertificate.serialHex());
+                entry.setIssuedCertificateIssuerDn(issuedCertificate.issuerDn());
+            }
         } else if (entry.isCompliant() && issued && !publicKeyMatch) {
             entry.setStatus(RegistryStatus.ANOMALY_PUBLIC_KEY_MISMATCH);
             entry.setActualPublicKeyFingerprint(actualPublicKeyFingerprint);
@@ -302,6 +335,16 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
         } else {
             entry.setStatus(RegistryStatus.REJECTED_NOT_ISSUED);
         }
+    }
+
+    private static IssuedCertificate issuedCertificateFrom(JsonNode op) {
+        String pem = op.path("issuedCertificatePem").asText(null);
+        String serialHex = op.path("issuedCertificateSerial").asText(null);
+        String issuerDn = op.path("issuedCertificateIssuerDn").asText(null);
+        if (pem == null || serialHex == null || issuerDn == null) {
+            return null;
+        }
+        return new IssuedCertificate(pem, serialHex, issuerDn);
     }
 
     @FunctionalInterface
@@ -376,14 +419,21 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
                 .filter(e -> fingerprint.equals(e.getPublicKeyFingerprint())
                         || fingerprint.equals(e.getActualPublicKeyFingerprint()))
                 .filter(RegistryEntry::isCompliant)
-                .findFirst();
+                .max(ApprovalRegistry.recency());
         if (compliantMatch.isPresent()) {
             return compliantMatch;
         }
         return entries.values().stream()
                 .filter(e -> fingerprint.equals(e.getPublicKeyFingerprint())
                         || fingerprint.equals(e.getActualPublicKeyFingerprint()))
-                .findFirst();
+                .max(ApprovalRegistry.recency());
+    }
+
+    @Override
+    public Optional<RegistryEntry> findByIssuedCertificate(BigInteger serial, X500Principal issuer) {
+        return entries.values().stream()
+                .filter(e -> ApprovalRegistry.issuedCertificateMatches(e, serial, issuer))
+                .max(ApprovalRegistry.recency());
     }
 
     @Override

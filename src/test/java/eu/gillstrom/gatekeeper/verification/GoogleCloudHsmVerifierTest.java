@@ -44,6 +44,28 @@ class GoogleCloudHsmVerifierTest {
     }
 
     @Test
+    void nonExtractableKeyIsNotReportedAsGeneratedOnDevice() throws Exception {
+        GoogleCloudHsmVerifier verifier = new GoogleCloudHsmVerifier();
+
+        KeyPair rootKp = TestPki.newRsaKeyPair(2048);
+        X509Certificate fakeRoot = TestPki.selfSignedCa(rootKp, "FAKE-MARVELL-ROOT");
+        KeyPair leafKp = TestPki.newRsaKeyPair(2048);
+        X509Certificate attestCert = TestPki.endEntity(
+                leafKp, "FAKE-GOOGLE-ATTEST", fakeRoot, rootKp.getPrivate());
+
+        byte[] blob = {0x01, 0x62, 0x00, 0x01, 0x00};
+        String blobB64 = Base64.getEncoder().encodeToString(blob);
+
+        GoogleCloudHsmVerifier.GoogleAttestationResult r = verifier.verifyGoogleAttestation(
+                blobB64, List.of(TestPki.toPem(attestCert)), leafKp.getPublic());
+
+        assertThat(r.isExtractable()).isFalse();
+        assertThat(r.getKeyOrigin()).isNotEqualTo("generated");
+        assertThat(r.getErrors()).anyMatch(e -> e.startsWith("GOOGLE_KEY_ORIGIN_UNVERIFIED"));
+        assertThat(r.isValid()).isFalse();
+    }
+
+    @Test
     void emptyChainIsRejected() {
         GoogleCloudHsmVerifier verifier = new GoogleCloudHsmVerifier();
         byte[] blob = new byte[16];

@@ -43,7 +43,7 @@ A peer reviewer who reduces this to "the gatekeeper does not technically prevent
 The gatekeeper exposes `GET /v1/gatekeeper/health`. From release 1.4.0 the endpoint requires the `SUPERVISOR` role, so the monitoring pipeline needs a client certificate that maps to it — it is not an anonymous liveness probe (`/v1/attestation/health` is). The response carries a JSON body with four load-bearing fields:
 
 - `auditLogReadable` — `true` iff the gatekeeper can read the audit-log file without I/O error.
-- `chainIntact` — `true` iff `AuditLog.verifyChainIntegrity()` walked the entire chain successfully (every entry's `prevEntryHashHex` matched the previous entry's `thisEntryHashHex`, and every `thisEntryHashHex` matched the SHA-256 over the canonical bytes).
+- `chainIntact` — `true` iff `AuditLog.verifyChainIntegrity()` walked the entire chain successfully (every entry's `prevEntryHashHex` matched the previous entry's `thisEntryHashHex`, every `thisEntryHashHex` matched the SHA-256 over the canonical bytes, and every entry signature verified with the configured signing algorithm under the active or a retired signing certificate). Since release 1.5.0 the walk runs over the audit file as read back from disk and requires it to end at the in-memory head, so editing or truncating the file under a running gatekeeper turns `chainIntact` false at the next recompute.
 - `chainCheckedAt` — when that walk ran. The result is cached and recomputed at most once per `gatekeeper.audit.integrity-check-interval-seconds` (default 300), because the walk is O(chain length) with one signature verification per entry. Polling faster than the interval returns the same answer with the same timestamp.
 - `mode` — `configured` for production (real seal certificate from a PKCS#12 keystore) or `ephemeral` for reference deployments (throwaway in-process key, marked `CN=REFERENCE-EPHEMERAL`).
 
@@ -61,7 +61,7 @@ Recommended cadence: **daily**, executed by a cron-driven job at a fixed UTC tim
 
 Recommended procedure:
 
-1. The cron job calls `GET /v1/gatekeeper/anchor` against the gatekeeper. The response is a JSON object containing `headSequenceNumber`, `headHashHex`, `headTimestamp`, `headSignatureBase64`, and `activeSigningKeyFingerprintHex`.
+1. The cron job calls `GET /v1/gatekeeper/anchor` against the gatekeeper. The response is a JSON object containing `headSequenceNumber`, `headHashHex`, `headTimestamp`, `headSignatureBase64`, `signingKeyFingerprintHex` and `totalEntries`.
 2. The job posts the anchor to one or more **independent** publication forums — for instance:
    - A timestamped commit to a transparency log such as Sigstore's Rekor or a privately-operated transparency service.
    - A signed publication to the NCA's public web site, dated and tagged with the inspection identifier.
@@ -78,7 +78,7 @@ Routine rotation, on a documented cadence (annually or per the NCA's signing-cer
 
 1. Provision the new key pair in the secure key store (HSM where deployed). Issue the new operator certificate from the CA the NCA uses for organisation certificates per its ordinary administrative signing practice (typically a domestic CA or eID infrastructure provider).
 2. Add the new keystore path / alias / password to the deployer's secrets-management system.
-3. Append the **previous** active certificate's PEM to the `gatekeeper.signing.retired-keys` configuration. This preserves verifiability of receipts and audit entries that were signed under the previous key during the DORA Regulation (EU) 2022/2554 Article 28(6) 5-year retention window.
+3. Append the **previous** active certificate's PEM to the `gatekeeper.signing.retired-keys` configuration. This preserves verifiability of receipts and audit entries that were signed under the previous key during the DORA Regulation (EU) 2022/2554 Article 28(6) 5-year retention window. Since release 1.5.0 the gatekeeper's own chain-integrity check also accepts entry signatures under the retired keys listed here; without the entry, every audit entry written before the rotation fails that check and `chainIntact` reports `false`. The check verifies every entry with the current `gatekeeper.signing.algorithm`, so a rotation that also changes the algorithm (for instance RSA to ECDSA) leaves the older entries unverifiable by the running gatekeeper; verify them offline with the old algorithm.
 4. Switch `gatekeeper.signing.keystore-path` and `gatekeeper.signing.key-alias` to the new key. Restart.
 5. Verify by issuing a synthetic verify call from a test client and confirming that the receipt is signed under the new key.
 6. Publish the new active certificate via the channel the NCA uses to announce supervisory key changes (web page, regulated mailing list, supervisor-portal notice).
@@ -87,7 +87,7 @@ Compromise rotation, on the day a compromise is detected:
 
 1. Take the gatekeeper out of service immediately. Do not produce further signatures with the compromised key.
 2. Provision a fresh key pair and operator certificate as in routine rotation.
-3. **Do not** add the compromised certificate to `gatekeeper.signing.retired-keys` for purposes of trust — the retired-keys list is for historical verifiability of legitimate receipts, not for continued trust of compromised ones. Instead, publish a compromise notice naming the compromised certificate fingerprint and the date from which receipts under that fingerprint must be treated as suspect.
+3. **Do not** add the compromised certificate to `gatekeeper.signing.retired-keys` for purposes of trust — the retired-keys list is for historical verifiability of legitimate receipts, not for continued trust of compromised ones. Since release 1.5.0 this also matters for the chain-integrity check: a retired key is accepted for audit-entry signatures, so listing the compromised one would let entries forged under it pass. Leaving it out means `chainIntact` reports `false` for the pre-compromise entries; that is the correct answer until they have been checked against the pre-compromise anchors. Instead, publish a compromise notice naming the compromised certificate fingerprint and the date from which receipts under that fingerprint must be treated as suspect.
 4. Restart the gatekeeper with the new key.
 5. Coordinate with relying parties (financial entities holding receipts; supervisors holding exports) to update their trust stores and to flag any receipts under the compromised fingerprint pending re-verification.
 
@@ -114,10 +114,10 @@ Scenario: a Swish technical supplier (TL) is suspected of issuing certificates w
 
 Procedure:
 
-1. Identify the supplier's mTLS principal (the DN of the client certificate they use to call the gatekeeper). For a Swedish TL this is typically `CN=<TL legal name>,O=<TL legal name>,SERIALNUMBER=<TL org number>`.
-2. URL-encode the principal. Call `GET /v1/audit/entity/{principal}` against the gatekeeper. The response is the full chronological sequence of audit entries attributable to that principal.
+1. Identify the supplier's mTLS principal as the gatekeeper records it. That is not the DN of the client certificate the supplier uses to call the gatekeeper, but the value `gatekeeper.security.mtls.principal-regex` captures from it: by default the CN value alone, so a subject `CN=<TL legal name>,O=<TL legal name>,SERIALNUMBER=<TL org number>` is recorded as `<TL legal name>`, or the SERIALNUMBER value where the NCA configures the regex that way (`application-nca.yaml`). The full DN is recorded only when the regex does not match.
+2. URL-encode the principal. Call `GET /v1/audit/entity/{principal}` against the gatekeeper. The comparison is exact, so a full DN returns nothing when the CN value was recorded. The response is the full chronological sequence of audit entries attributable to that principal.
 3. Inspect the entries. Anomalies to look for:
-   - Repeated identical `requestDigestBase64` across different `verificationId` values — the same attestation evidence reused for distinct keys.
+   - Repeated identical `requestDigestBase64` across different `verificationId` values — the same request, public key included, submitted more than once. The digest covers the public key, so it cannot show the same attestation evidence reused for *distinct* keys; that needs the evidence itself, which the audit log does not hold.
    - Sudden bursts of NON-COMPLIANT decisions followed by COMPLIANT decisions in the same window — possible attempts to game the verifier.
    - Large gaps in timestamp followed by clustered activity — possible after-hours batch issuance.
 4. Cross-reference with the financial entity's records via the Phase 1 / Phase 2 / Phase 3 reconciliation procedure described in `README.md` Section 4.1.
@@ -130,7 +130,7 @@ Scenario: the NCA's annual supervisory plan calls for a full review of all gatek
 Procedure:
 
 1. Compute the inspection's calendar window in UTC (for example, `2026-01-01T00:00:00Z` to `2026-04-01T00:00:00Z`).
-2. The audit-query API caps a single `range` query at 90 days; for a calendar quarter this is exactly the limit. For longer windows, issue multiple successive queries.
+2. The audit-query API caps a single `range` or `export` query at 90 days and answers a wider window with `400`. January–March of a non-leap year is exactly 90 days; the other calendar quarters are 91 or 92 days and must be split. For longer windows, issue multiple successive queries.
 3. Call `GET /v1/audit/export?from=...&to=...&inspectionId=<NCA case id>` against the gatekeeper. The supervisor passes the NCA's own case identifier (for example `FI-2026-001`) so that the export bundle is bound to the inspection record.
 4. Retain the response body as inspection evidence. The `AuditExport` JSON contains the full list of audit entries in the window, the chain-head hash at the moment of export, the active signing key fingerprint, and the gatekeeper's signature over the canonical bytes of the export.
 5. To verify the export later: recompute the canonical bytes via `AuditExport.canonicalBytesForSignature(...)` and verify the signature against the active certificate (obtained from `GET /v1/gatekeeper/keys` at the time of export, retained as part of the inspection record).
@@ -160,7 +160,7 @@ Specific cadence is a supervisory-policy decision under DORA Article 50, not a r
 
 **Data sources to triangulate:**
 
-1. **Gatekeeper audit log.** Run `GET /v1/audit/range?from=...&to=...&inspectionId=...` to extract every `verify` and `confirm` entry in the period. Each entry includes the attestation key fingerprint and (for `confirm`) the issued cert serial number.
+1. **Gatekeeper audit log and approval registry.** Run `GET /v1/audit/range?from=...&to=...` (or `GET /v1/audit/export?from=...&to=...&inspectionId=...` for a signed copy) to extract every `VERIFY` and `CONFIRM` entry in the period. An audit entry carries the `verificationId`, the operation, the principal, the outcome bit and SHA-256 digests of the request and the receipt — not the key fingerprint and not the certificate serial. Those are held in the approval registry under the same `verificationId`: `publicKeyFingerprint` from Step 3 and, after a Step 7 confirmation that ended in `VERIFIED_AND_ISSUED`, `issuedCertificateSerial` and `issuedCertificateIssuerDn`. No endpoint lists them for confirmed entries — `GET /v1/attestation/{countryCode}/registry/anomalies` and `.../awaiting` return only anomalous and unconfirmed entries — so the NCA reads the registry journal at `gatekeeper.registry.path` (`REGISTER` and `CONFIRM` lines) on the gatekeeper host and joins it to the audit entries on `verificationId`. The journal is not tamper-evident (`THREAT_MODEL.md`, Tampering); the audit entries are what show that the verification and the confirmation took place.
 2. **FE's own issuance register** (DORA Article 28(6) plus Bokföringslagen (1999:1078) 7 kap.). Request from the FE under DORA Article 50(1)(a): list of every cert the FE issued in the period, including key fingerprint, cert serial number, and issuance timestamp.
 3. **Technical provider's transaction logs** (where applicable; in the Swish architecture this is GetSwish AB's payment-transaction record). For each cert serial, the technical provider produces the list of payment transactions signed under it. Used for proportionality assessment under Article 51(2), not for breach detection itself.
 4. **CRL/OCSP data from the issuing CA.** Independent record of which cert serial numbers were actually issued.
@@ -168,7 +168,7 @@ Specific cadence is a supervisory-policy decision under DORA Article 50, not a r
 **Triangulation procedure:**
 
 1. From source (2), enumerate every certificate the FE claims to have issued in the period.
-2. For each cert, look up the matching `verify`+`confirm` pair in source (1) by key fingerprint and cert serial.
+2. For each cert, find the registry entry in source (1) by certificate serial and issuer DN, or by key fingerprint, and check that the audit log holds a `VERIFY` and a `CONFIRM` entry with that entry's `verificationId`.
 3. Flag every cert in source (2) without a matching pair in source (1). These are the candidate breaches.
 4. Cross-check candidates against source (4): does the issuing CA's CRL/OCSP confirm the cert was actually issued? If yes, the breach is confirmed.
 5. For each confirmed breach, optionally consult source (3) to determine whether the breaching cert was used to sign payment transactions. This goes to proportionality of sanction under Article 51(2), not to whether a breach occurred.
@@ -192,9 +192,11 @@ Scenario: the central-bank settlement-rail operator (Sveriges Riksbank for RIX-I
 **Operational responsibilities of the NCA:**
 
 - **Provision a `SETTLEMENT_RAIL`-role mTLS certificate** to the settlement-rail operator (typically the central bank) following the role-mapping convention in `DEPLOYMENT.md` §4. This certificate authorises the settlement-rail clients to call `/api/v1/verify`.
-- **Monitor the rate of `CERT_NOT_FOUND` and `SIGNATURE_INVALID` decisions.** A sudden rise indicates either (a) an issuance flow that is bypassing gatekeeper (a breach detection signal), or (b) a settlement-rail integration regression. Either case warrants supervisory follow-up.
-- **Reconcile the gatekeeper audit log against the settlement-rail logs.** The settlement-rail operator's logs of allowed/denied settlements must reconcile with the gatekeeper audit-entry references returned in the `auditEntryId` field. Discrepancies indicate either log-tampering or mTLS-replay incidents.
+- **Monitor the rate of `CERT_NOT_FOUND` and `SIGNATURE_INVALID` decisions.** A sudden rise indicates either (a) an issuance flow that is bypassing gatekeeper (a breach detection signal), (b) issued certificates whose Step 7 confirmation never reached the gatekeeper, or (c) a settlement-rail integration regression. Any of these warrants supervisory follow-up.
+- **Reconcile the gatekeeper audit log against the settlement-rail logs.** The settlement-rail operator's logs of allowed/denied settlements must reconcile with the gatekeeper's `SETTLEMENT_VERIFY` audit entries. From release 1.5.0 each `/api/v1/verify` response carries `auditEntryHashHex`, the `thisEntryHashHex` of the `SETTLEMENT_VERIFY` entry written for that call, and railgate records it with its decision, so every railgate decision that reached the gatekeeper names exactly one entry in an export. `auditEntryId` does not do that: it is the registry `verificationId` the verdict was read from, shared by every settlement against the same certificate and by that issuance's `VERIFY` and `CONFIRM` entries, and `null` when no registry entry matched (`CERT_NOT_FOUND`). Discrepancies indicate either log-tampering or mTLS-replay incidents.
 - **Coordinate with the central bank under DORA Article 32 (oversight forum).** Settlement-time enforcement is a joint operational responsibility; the gatekeeper holds the compliance state, the settlement rail holds the enforcement chokepoint.
+
+**Certificate lookup.** railgate sends four fields — `certSerial`, `issuerDn`, `digestHex`, `signatureBase64` — and no certificate. From release 1.5.0 the gatekeeper resolves the certificate from those it stored at Step 7: `certSerial` is read as hexadecimal (case-insensitive, optional `0x`) and compared as a number, `issuerDn` is compared as an X.500 name. A certificate is stored only when its Step 7 confirmation ended in `VERIFIED_AND_ISSUED`; until then — and for a certificate issued outside the gatekeeper flow — the answer is `CERT_NOT_FOUND`. Before 1.5.0 a request without `signingCertificatePem` was answered `MALFORMED_INPUT`, so no four-field settlement could succeed. The gatekeeper, hsm and railgate must be deployed at 1.5.0 together.
 
 **Data minimisation envelope.** The supervisor never receives transaction payload content via `/api/v1/verify`. The endpoint contract is intentionally limited to cryptographic artefacts. The supervisor's ICT-third-party-data-processing register under DORA Article 28(3) should reflect this scope explicitly: for the settlement-time verification function, only digests, signatures, and certificate identifiers are processed.
 
@@ -209,7 +211,7 @@ For full procedural detail, see `FORENSIC_INSPECTION.md`. This section summarise
 When evidence is required for a court proceeding (administrative, civil, or criminal):
 
 1. Identify the verification IDs in scope.
-2. Pull each `AuditEntry` via `GET /v1/audit/witness/{verificationId}`.
+2. Pull each `AuditEntry` via `GET /v1/audit/witness/{verificationId}`. That returns the earliest entry with the identifier — the `VERIFY` or `BATCH_VERIFY` entry of an issuance. The `CONFIRM` and `SETTLEMENT_VERIFY` entries carrying the same `verificationId` are pulled with `GET /v1/audit/range` or `GET /v1/audit/export` over the relevant window.
 3. Pull the chain-anchor at the moment of extraction via `GET /v1/gatekeeper/anchor`. This commits the gatekeeper to the state of the audit log at the extraction instant — even if subsequent audit entries are added, the anchor pins the present.
 4. Pull `GET /v1/gatekeeper/keys` to record the certificates needed to verify the entry signatures and the anchor signature.
 5. Bundle into a forensic package and seal it under the NCA's own organisation-certificate-backed signing key as in Section 3.4.
@@ -254,11 +256,11 @@ DORA Regulation (EU) 2022/2554 Article 56(2) caps the retention of personal data
 
 Within the 5–15-year window the gatekeeper applies a layered policy to the audit log:
 
-- **Layer A — entries with no personal-data fields** (the typical case: audit entries whose `mtlsClientPrincipal` is an organisational DN with no personal name, and which carry only request and receipt digests). These are governed only by DORA Article 28(6) and parallel domestic obligations. The recommended retention is **7 years**, set in `gatekeeper.audit.retention-years`. Rationale: aligns with the Bokföringslag (1999:1078) 7-year requirement for business records, and covers the most common bands of Brottsbalken (1962:700) preskriptionstid for relevant economic crimes (5–10 years for most relevant categories).
+- **Layer A — entries with no personal-data fields** (the typical case: audit entries whose `mtlsClientPrincipal` is an organisation's name or identifier with no personal name, and which carry only request and receipt digests). These are governed only by DORA Article 28(6) and parallel domestic obligations. The recommended retention is **7 years**. Rationale: aligns with the Bokföringslag (1999:1078) 7-year requirement for business records, and covers the most common bands of Brottsbalken (1962:700) preskriptionstid for relevant economic crimes (5–10 years for most relevant categories).
 - **Layer B — entries that contain personal data** (audit entries whose `mtlsClientPrincipal` includes a natural-person name, or any entry that legitimately carries other personal data). These are governed by both DORA Article 28(6) (≥ 5 years) and DORA Article 56(2) (≤ 15 years). The retention window therefore is **5–15 years**, with the actual value set by the deployer based on the type of supervisory case the entry might support. A deployer may default to 7 years for parity with Layer A and extend on a case-by-case basis when an active proceeding requires it.
 - **Layer C — entries under an active litigation hold or under an active supervisory investigation** are exempt from the upper bound and retained until the proceeding closes. After the proceeding closes, entries return to either Layer A or Layer B depending on their personal-data status.
 
-The gatekeeper exposes the default retention via `gatekeeper.audit.retention-years` (default 7). The operator must additionally implement Layer-B and Layer-C overrides through operational procedure, since the gatekeeper does not by itself classify entries as containing personal data.
+`gatekeeper.audit.retention-years` is set to 5 in `application.yaml` and `application-nca.yaml`, but it is declarative only: no code reads it, and the gatekeeper never prunes or deletes audit entries. Retention — Layer A as much as Layers B and C — is therefore implemented through operational procedure; an operator adopting the 7-year recommendation should also set the property to 7 so the configuration records the policy. The gatekeeper does not by itself classify entries as containing personal data.
 
 ### 5.4 Retention versus storage limitation
 
@@ -272,7 +274,7 @@ The position adopted by this runbook is that the layered DORA Article 28(6) / Ar
 
 The `AuditEntry` record carries the following potentially-personal fields:
 
-- `mtlsClientPrincipal` — the DN of the mTLS client certificate. For organisational certificates this is normally not personal data (legal-person attributes only). For natural-person certificates it can be personal data.
+- `mtlsClientPrincipal` — the value `gatekeeper.security.mtls.principal-regex` captures from the subject DN of the mTLS client certificate (by default the CN value; the full DN only when the regex does not match; `reference-anonymous` under the permissive reference filter chain). For organisational certificates this is normally not personal data (legal-person attributes only). For natural-person certificates the recorded value can be the person's name and is then personal data.
 - `verificationId` — a UUID. Not personal data on its own; can become personal in combination with other records.
 - `requestDigestBase64`, `receiptDigestBase64` — SHA-256 digests. Not personal data; they are one-way functions of input.
 - `compliant` — a Boolean. Not personal data on its own.
@@ -288,7 +290,7 @@ A data subject may invoke GDPR Article 17 (right to erasure). The gatekeeper's r
 - Identify which audit entries (if any) carry personal data attributable to the data subject.
 - For each entry, determine whether the supervisory retention exception (GDPR Article 17(3)(b)) applies. For DORA-recorded events the answer is normally yes for the duration of the retention window.
 - Where the supervisory exception applies, document the position and notify the data subject of the lawful basis.
-- Where it does not (e.g. an entry was created in error and the retention obligation does not attach), erase the entry. Because the audit log is hash-chained, "erasure" in the cryptographic sense is not possible — a deletion record is appended that voids the original entry, and the chain head moves forward. The original `thisEntryHashHex` remains a fixed point in the chain so that prior anchors remain valid; the deletion record is the supervisory acknowledgement that the content is no longer to be relied upon.
+- Where it does not (e.g. an entry was created in error and the retention obligation does not attach), the gatekeeper offers no erasure mechanism. There is no deletion record: the gatekeeper writes only the operations `VERIFY`, `BATCH_VERIFY`, `CONFIRM` and `SETTLEMENT_VERIFY`, no endpoint removes or voids an entry, and removing or editing an entry in the file makes `verifyChainIntegrity()` fail at that entry and at every later one. An erasure is therefore an operational act outside the gatekeeper that leaves a visible break in the chain; decide it with the data-protection officer and record the break and its reason in the NCA's case file, so that the failed integrity check can be explained to anyone who later verifies the chain against a published anchor.
 
 ### 6.3 Cross-border data transfer
 

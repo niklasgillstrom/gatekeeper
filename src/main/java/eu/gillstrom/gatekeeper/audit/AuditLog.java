@@ -48,18 +48,17 @@ public interface AuditLog {
     AuditEntry append(AuditAppendRequest req);
 
     /**
-     * Look up an entry by its associated {@code verificationId}. The
-     * relation is one-to-one for {@code VERIFY} and {@code CONFIRM}
-     * operations, so this returns at most one entry. (For
-     * {@code BATCH_VERIFY}, each request inside the batch is appended
-     * with its own per-request {@code verificationId} and is therefore
-     * also recoverable here.)
+     * Look up the earliest entry with the given {@code verificationId}.
+     * Each {@code VERIFY} and {@code BATCH_VERIFY} entry has its own
+     * {@code verificationId}, generated at verification, so for an
+     * issuance this returns that entry.
      *
-     * <p>{@code SETTLEMENT_VERIFY} entries are the exception: one issuance
-     * {@code verificationId} accumulates one settlement entry per query
-     * against that certificate, so this method returns only the earliest
-     * of them. Use {@link #findInRange(Instant, Instant)} to enumerate
-     * settlement-time decisions.</p>
+     * <p>The {@code verificationId} is not unique across the log. Every
+     * {@code CONFIRM} attempt for it — including one rejected for a nonce
+     * mismatch — and every {@code SETTLEMENT_VERIFY} query against the
+     * certificate appends a further entry carrying the same identifier, and
+     * this method returns none of them. Use
+     * {@link #findInRange(Instant, Instant)} to enumerate them.</p>
      */
     Optional<AuditEntry> findByVerificationId(String verificationId);
 
@@ -102,8 +101,10 @@ public interface AuditLog {
      *       entry).</li>
      *   <li>{@code thisEntryHashHex} equals the SHA-256 of the entry's
      *       canonical bytes.</li>
-     *   <li>{@code entrySignatureBase64} verifies under the gatekeeper's
-     *       active signing certificate.</li>
+     *   <li>{@code entrySignatureBase64} verifies, with the signing
+     *       algorithm the gatekeeper is configured with, under the active
+     *       signing certificate or a retired one listed in
+     *       {@code gatekeeper.signing.retired-keys}.</li>
      * </ol>
      * Any failure returns {@code false}; passing all three for every
      * entry returns {@code true}. An empty log is considered intact

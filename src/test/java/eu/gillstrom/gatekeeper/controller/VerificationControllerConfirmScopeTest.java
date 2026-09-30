@@ -23,6 +23,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -102,6 +103,18 @@ class VerificationControllerConfirmScopeTest {
                         .contentType("application/json")
                         .content(json.writeValueAsString(confirmation("v-3"))))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void nonceMismatchIsLabelledAsANonceMismatch() throws Exception {
+        when(verificationService.confirmIssuance(any(), any()))
+                .thenThrow(new ApprovalRegistry.NonceMismatchException("v-4"));
+
+        mockMvc.perform(post("/v1/attestation/SE/confirm")
+                        .contentType("application/json")
+                        .content(json.writeValueAsString(confirmation("v-4"))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.registryStatus").value("ANOMALY_NONCE_MISMATCH"));
     }
 
     private static IssuanceConfirmation confirmation(String verificationId) {

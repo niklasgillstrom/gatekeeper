@@ -28,7 +28,7 @@ import java.util.Base64;
  * gatekeeper.signing.keystore-password=&lt;secret&gt;
  * gatekeeper.signing.key-alias=nca-seal
  * gatekeeper.signing.key-password=&lt;secret&gt;   # optional, defaults to keystore password
- * gatekeeper.signing.algorithm=SHA256withRSA    # or SHA384withECDSA, SHA256withRSAandMGF1 for PSS
+ * gatekeeper.signing.algorithm=SHA256withRSA    # or e.g. SHA384withRSA, SHA256withECDSA, SHA384withECDSA
  * </pre>
  *
  * <p>At startup the chosen certificate's subject is logged so operators can
@@ -101,6 +101,11 @@ public class ConfiguredReceiptSigner implements ReceiptSigner {
     @Override
     public String getSigningCertificatePem() {
         return certificatePem;
+    }
+
+    @Override
+    public String getSignatureAlgorithm() {
+        return algorithm;
     }
 
     private static String encodeChain(Certificate[] chain) throws Exception {

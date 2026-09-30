@@ -47,6 +47,8 @@ public class EphemeralReceiptSigner implements ReceiptSigner {
 
     private static final Logger log = LoggerFactory.getLogger(EphemeralReceiptSigner.class);
 
+    private static final String SIGNATURE_ALGORITHM = "SHA256withRSA";
+
     private final PrivateKey privateKey;
     private final String certificatePem;
     private final String signerIdentifier;
@@ -86,7 +88,7 @@ public class EphemeralReceiptSigner implements ReceiptSigner {
     public byte[] sign(byte[] canonicalReceipt) {
         try {
             log.warn("Signing receipt with EphemeralReceiptSigner — NOT the NCA's production organisation certificate.");
-            Signature sig = Signature.getInstance("SHA256withRSA");
+            Signature sig = Signature.getInstance(SIGNATURE_ALGORITHM);
             sig.initSign(privateKey);
             sig.update(canonicalReceipt);
             return sig.sign();
@@ -98,6 +100,11 @@ public class EphemeralReceiptSigner implements ReceiptSigner {
     @Override
     public String getSigningCertificatePem() {
         return certificatePem;
+    }
+
+    @Override
+    public String getSignatureAlgorithm() {
+        return SIGNATURE_ALGORITHM;
     }
 
     private static X509Certificate buildSelfSignedCert(KeyPair kp) throws Exception {

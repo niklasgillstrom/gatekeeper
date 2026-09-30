@@ -59,6 +59,8 @@ public interface ReceiptSigner {
      */
     String getSigningCertificatePem();
 
+    String getSignatureAlgorithm();
+
     /**
      * Helper that populates {@code signature} and {@code signingCertificate}
      * on the provided response, using {@link ReceiptCanonicalizer} to compute

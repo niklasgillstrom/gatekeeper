@@ -16,7 +16,7 @@ The procedures below assume a deployed gatekeeper running with `gatekeeper.signi
 
 ### 2.1 Audit entry for a specific verification
 
-Each `AuditEntry` is a record of one gatekeeper decision (verify, verify-batch, or confirm). To obtain:
+Each `AuditEntry` is a record of one gatekeeper decision (`VERIFY`, `BATCH_VERIFY`, `CONFIRM` or `SETTLEMENT_VERIFY`). To obtain the entry of a verification:
 
 ```bash
 curl --cert client.pem --key client.key \
@@ -24,13 +24,13 @@ curl --cert client.pem --key client.key \
      "https://dora-api.fi.se/v1/audit/witness/${verificationId}"
 ```
 
-The response carries the entry's `sequenceNumber`, `timestamp`, `mtlsClientPrincipal`, `operation`, `verificationId`, `requestDigestBase64`, `receiptDigestBase64`, `compliant`, `prevEntryHashHex`, `thisEntryHashHex`, and `entrySignatureBase64`. Save the response verbatim — including HTTP headers, in particular the `Date` header, so the time of extraction is in the record.
+The response is the earliest entry with that `verificationId`, which for an issuance is its `VERIFY` or `BATCH_VERIFY` entry. `CONFIRM` entries (one per confirmation attempt, rejected ones included) and `SETTLEMENT_VERIFY` entries carry the same `verificationId` and are not returned by this call; obtain them from the signed export (Section 2.3). The response carries the entry's `sequenceNumber`, `timestamp`, `mtlsClientPrincipal`, `operation`, `verificationId`, `requestDigestBase64`, `receiptDigestBase64`, `compliant`, `prevEntryHashHex`, `thisEntryHashHex`, and `entrySignatureBase64`. Save the response verbatim — including HTTP headers, in particular the `Date` header, so the time of extraction is in the record.
 
 ### 2.2 Chain integrity proof
 
 The chain integrity proof binds every audit entry to every other audit entry. Two complementary primitives are available:
 
-- **`verifyChainIntegrity()` over a snapshot.** Run by the gatekeeper's own code path behind `GET /v1/gatekeeper/health`. From release 1.4.0 the result is cached and recomputed at most once per `gatekeeper.audit.integrity-check-interval-seconds`, so `chainIntact` is proof that the chain was intact at the instant reported in `chainCheckedAt`, not necessarily at the instant of the call — for an inspection record, cite the pair. For court use, additionally export the chain (Section 2.3) and rerun `verifyChainIntegrity()` independently against the exported bytes — a court-appointed expert must be able to do this without trusting the NCA's tooling.
+- **`verifyChainIntegrity()` over the file on disk.** Run by the gatekeeper's own code path behind `GET /v1/gatekeeper/health`. From release 1.5.0 the walk reads the audit file back from disk, re-parses it with the parser used at start-up, and requires it to end at the in-memory head; before that it walked the in-memory copy, so a change made to the file while the gatekeeper was running was not reported until the next restart. Entry signatures are verified with the configured `gatekeeper.signing.algorithm` under the active or a retired signing certificate. From release 1.4.0 the result is cached and recomputed at most once per `gatekeeper.audit.integrity-check-interval-seconds`, so `chainIntact` is proof that the chain was intact at the instant reported in `chainCheckedAt`, not necessarily at the instant of the call — for an inspection record, cite the pair. For court use, additionally export the chain (Section 2.3) and rerun `verifyChainIntegrity()` independently against the exported bytes — a court-appointed expert must be able to do this without trusting the NCA's tooling.
 - **Anchor reconciliation.** Pair the chain head observed at time t1 with a previously published anchor at time t0 < t1. If the t0 anchor is reachable by walking back the chain from the t1 head, no entry pre-existing at t0 has been rewritten in the interval [t0, t1]. The t0 anchor, being a published commitment, is independent of the NCA's current state.
 
 ### 2.3 Signed export for an interval
@@ -47,12 +47,12 @@ The response is an `AuditExport` JSON object with these fields:
 
 - `inspectionId` — caller-supplied or gatekeeper-generated UUID.
 - `generatedAt` — instant of export at the gatekeeper.
-- `from`, `to` — the window.
+- `rangeFrom`, `rangeTo` — the window.
 - `entryCount` — `entries.size()`; included so that a missing entry is detectable independently of `entries.length`.
 - `entries` — the list of `AuditEntry` records.
-- `chainHeadHashHex` — the chain head as of `generatedAt`.
-- `bundleSignatureBase64` — gatekeeper signature over `AuditExport.canonicalBytesForSignature(...)`.
-- `signingKeyFingerprintHex` — fingerprint of the active operator certificate.
+- `chainHeadHashAtExport` — the chain head's `thisEntryHashHex` as of `generatedAt`.
+- `exportSignatureBase64` — gatekeeper signature over `AuditExport.canonicalBytesForSignature(...)`.
+- `signingKeyFingerprintHex` — lower-case hex SHA-256 of the active signing key's DER-encoded public key, as listed by `GET /v1/gatekeeper/keys`.
 
 Save the entire response verbatim. The export is self-contained and self-verifying.
 
@@ -86,8 +86,8 @@ Scenario: the supervisor has a signing certificate of unknown provenance and wan
 
 1. Compute the SHA-256 fingerprint of the certificate's `SubjectPublicKeyInfo`. This is the same fingerprint the gatekeeper records in `VerificationResponse.publicKeyFingerprint` and binds in the Step-7 confirm.
 2. Run `GET /v1/audit/range?from=<earliest plausible>&to=<latest plausible>` over a window that covers the certificate's notBefore date.
-3. Filter the returned entries to `operation=confirm`. For each candidate, re-fetch the corresponding `VerificationResponse` (operationally retained at the financial-entity side) and compare its `publicKeyFingerprint` against the certificate's.
-4. If a matching entry exists with `compliant=true` and `loopClosed=true`, the certificate's issuance was authorised. If no matching entry exists, the certificate either was not authorised or was issued via a path that bypassed the gatekeeper — the latter being the qualitatively more serious finding flagged in `README.md` Section "Secondary control — registry reconciliation".
+3. Filter the returned entries to `operation` = `CONFIRM`. The audit entry carries neither the key fingerprint nor the certificate serial, so for each candidate re-fetch the corresponding `VerificationResponse` (operationally retained at the financial-entity side) and compare its `publicKeyFingerprint` against the certificate's, or read the approval-registry journal (`gatekeeper.registry.path`), whose `CONFIRM` line for the same `verificationId` carries the issued certificate's serial and issuer DN when the confirmation ended in `VERIFIED_AND_ISSUED` (from release 1.5.0).
+4. If a matching `CONFIRM` entry exists with `compliant=true` — set only when the loop closed with no anomaly; the audit entry has no `loopClosed` field — the certificate's issuance was authorised. If no matching entry exists, the certificate either was not authorised or was issued via a path that bypassed the gatekeeper — the latter being the qualitatively more serious finding flagged in `README.md` Section "Secondary control — registry reconciliation".
 
 ## 4. Cryptographic verification primitives
 
@@ -97,7 +97,7 @@ A forensic verifier must be able to recompute every digest and verify every sign
 
 - **Algorithm:** SHA-256.
 - **Input encoding:** UTF-8 bytes of the canonical-form string for receipts (`ReceiptCanonicalizer`) and audit entries (`AuditEntry.canonicalBytesForHash`).
-- **Output encoding:** hex (lower-case) for chain-internal hashes (`thisEntryHashHex`, `prevEntryHashHex`, `chainHeadHashHex`); standard Base64 with `=` padding for `requestDigestBase64` and `receiptDigestBase64`.
+- **Output encoding:** hex (lower-case) for chain-internal hashes (`thisEntryHashHex`, `prevEntryHashHex`, `chainHeadHashAtExport`); standard Base64 with `=` padding for `requestDigestBase64` and `receiptDigestBase64`.
 
 ### 4.2 Signing
 
@@ -105,7 +105,7 @@ A forensic verifier must be able to recompute every digest and verify every sign
 - **Signature encoding:** standard Base64 with `=` padding.
 - **Signed input for receipts:** `ReceiptCanonicalizer.canonicalize(VerificationResponse)` — a UTF-8 byte sequence beginning with `v2|` (`v1|` for receipts issued before release 1.4.0; a receipt is re-verified with the canonicaliser version its own prefix names).
 - **Signed input for audit entries:** `thisEntryHashHex.getBytes(UTF_8)`. Signing the hex form of the chain hash, rather than the raw 32-byte digest, keeps the signature input identical to what is published in the JSON Lines storage form, which simplifies retroactive verification.
-- **Signed input for export bundles:** `AuditExport.canonicalBytesForSignature(...)` — combines `inspectionId`, `generatedAt`, `from`, `to`, `entryCount`, the entries' chain hashes, and the active key fingerprint.
+- **Signed input for export bundles:** `AuditExport.canonicalBytesForSignature(...)` — the pipe-separated UTF-8 string `v1|inspectionId|generatedAt|rangeFrom|rangeTo|entryCount|chainHeadHashAtExport|signingKeyFingerprintHex`, followed by `|thisEntryHashHex` for each entry in the window; `%` and `|` inside string fields are escaped as `%25` and `%7C`, and instants are rendered by `Instant.toString()`.
 
 ### 4.3 Certificate handling
 

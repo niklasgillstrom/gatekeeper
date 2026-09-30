@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import eu.gillstrom.gatekeeper.service.GatekeeperKeyDirectory;
 import eu.gillstrom.gatekeeper.signing.ReceiptSigner;
 
 import java.io.ByteArrayInputStream;
@@ -25,6 +26,7 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.PublicKey;
 import java.security.Signature;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -67,11 +69,13 @@ import java.util.concurrent.locks.ReentrantLock;
  * shutdown hook cannot wedge a worker thread; on interrupt the operation
  * fails with {@link AuditLogException}. Read methods take a snapshot of
  * the in-memory entry list, so they never observe a half-built entry.
- * {@link #verifyChainIntegrity()} copies the list under the lock and then
- * releases it before recomputing hashes and verifying signatures — the
- * walk is O(n) with one RSA verification per entry and must not sit in the
- * append path. {@link #cachedIntegrityStatus()} additionally bounds how
- * often that walk runs.</p>
+ * {@link #verifyChainIntegrity()} copies the list under the lock, releases
+ * it, reads the file back from disk with the parser used at load, requires
+ * the entries on disk to end at the in-memory head, and only then
+ * recomputes hashes and verifies signatures over what is on disk — the
+ * walk is O(n) with one signature verification per entry and must not sit
+ * in the append path. {@link #cachedIntegrityStatus()} additionally bounds
+ * how often that walk runs.</p>
  *
  * <p>Legal basis: see {@link AuditLog} javadoc.</p>
  */
@@ -85,6 +89,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
 
     private final Path filePath;
     private final ReceiptSigner signer;
+    private final GatekeeperKeyDirectory keyDirectory;
     private final ObjectMapper json;
     private final ReentrantLock appendLock = new ReentrantLock();
 
@@ -129,14 +134,21 @@ public class AppendOnlyFileAuditLog implements AuditLog {
         this(configuredPath, signer, DEFAULT_INTEGRITY_CHECK_INTERVAL_SECONDS);
     }
 
+    public AppendOnlyFileAuditLog(String configuredPath, ReceiptSigner signer,
+                                  long integrityCheckIntervalSeconds) {
+        this(configuredPath, signer, integrityCheckIntervalSeconds, null);
+    }
+
     @Autowired
     public AppendOnlyFileAuditLog(
             @Value("${gatekeeper.audit.path:./audit-log.jsonl}") String configuredPath,
             ReceiptSigner signer,
             @Value("${gatekeeper.audit.integrity-check-interval-seconds:300}")
-            long integrityCheckIntervalSeconds) {
+            long integrityCheckIntervalSeconds,
+            GatekeeperKeyDirectory keyDirectory) {
         this.filePath = Paths.get(configuredPath);
         this.signer = signer;
+        this.keyDirectory = keyDirectory;
         this.integrityCheckIntervalSeconds = integrityCheckIntervalSeconds;
         @SuppressWarnings("deprecation")
         ObjectMapper mapper = new ObjectMapper()
@@ -186,7 +198,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
             }
             AuditEntry entry;
             try {
-                entry = json.readValue(line, AuditEntry.class);
+                entry = parseLine(line);
             } catch (Exception parseEx) {
                 if (i == lines.size() - 1) {
                     log.warn("AppendOnlyFileAuditLog: trailing line {} is not parseable as JSON. "
@@ -419,7 +431,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
 
     @Override
     public boolean verifyChainIntegrity() {
-        boolean intact = verifyChain(snapshot());
+        boolean intact = verifyChainOnDisk();
         cachedIntegrity.set(new IntegrityStatus(intact, Instant.now()));
         return intact;
     }
@@ -431,8 +443,9 @@ public class AppendOnlyFileAuditLog implements AuditLog {
      * {@code gatekeeper.audit.integrity-check-interval-seconds} (default
      * {@value #DEFAULT_INTEGRITY_CHECK_INTERVAL_SECONDS}). The recompute
      * itself takes a snapshot of the entry list under {@link #appendLock}
-     * and then releases the lock before walking the chain, so the RSA
-     * verifications never block a concurrent {@code append}.</p>
+     * and then releases the lock before reading the file back and walking
+     * the chain, so the signature verifications never block a concurrent
+     * {@code append}.</p>
      */
     @Override
     public IntegrityStatus cachedIntegrityStatus() {
@@ -453,7 +466,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
             if (isFresh(latest)) {
                 return latest;
             }
-            IntegrityStatus fresh = new IntegrityStatus(verifyChain(snapshot()), Instant.now());
+            IntegrityStatus fresh = new IntegrityStatus(verifyChainOnDisk(), Instant.now());
             cachedIntegrity.set(fresh);
             return fresh;
         } finally {
@@ -486,8 +499,54 @@ public class AppendOnlyFileAuditLog implements AuditLog {
         }
     }
 
+    private AuditEntry parseLine(String line) throws IOException {
+        return json.readValue(line, AuditEntry.class);
+    }
+
+    private boolean verifyChainOnDisk() {
+        List<AuditEntry> memory = snapshot();
+        List<AuditEntry> onDisk = new ArrayList<>();
+        try {
+            String content = new String(Files.readAllBytes(filePath), StandardCharsets.UTF_8);
+            for (String line : content.lines().toList()) {
+                if (onDisk.size() == memory.size()) {
+                    break;
+                }
+                if (line.isBlank()) {
+                    continue;
+                }
+                onDisk.add(parseLine(line));
+            }
+        } catch (Exception e) {
+            log.warn("AuditLog chain check failed: {} could not be read back and parsed: {}",
+                    filePath.toAbsolutePath(), e.toString());
+            return false;
+        }
+        if (onDisk.size() != memory.size()) {
+            log.warn("AuditLog chain check failed: {} holds {} entries, the in-memory chain {}",
+                    filePath.toAbsolutePath(), onDisk.size(), memory.size());
+            return false;
+        }
+        if (!memory.isEmpty()) {
+            AuditEntry memoryHead = memory.get(memory.size() - 1);
+            AuditEntry diskHead = onDisk.get(onDisk.size() - 1);
+            if (memoryHead.sequenceNumber() != diskHead.sequenceNumber()
+                    || !MessageDigest.isEqual(
+                            memoryHead.thisEntryHashHex().getBytes(StandardCharsets.UTF_8),
+                            diskHead.thisEntryHashHex().getBytes(StandardCharsets.UTF_8))) {
+                log.warn("AuditLog chain check failed: head on disk (sequenceNumber {}) does not match "
+                        + "the in-memory head (sequenceNumber {})",
+                        diskHead.sequenceNumber(), memoryHead.sequenceNumber());
+                return false;
+            }
+        }
+        return verifyChain(onDisk);
+    }
+
     /** The chain walk itself. Takes no lock; operates on a snapshot. */
     private boolean verifyChain(List<AuditEntry> chain) {
+        String algorithm = signer.getSignatureAlgorithm();
+        List<PublicKey> verificationKeys = verificationKeys();
         String expectedPrev = AuditEntry.SENTINEL_PREV_HASH_HEX;
         long expectedSeq = 1;
         for (AuditEntry e : chain) {
@@ -509,7 +568,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
                         e.sequenceNumber(), recomputed, e.thisEntryHashHex());
                 return false;
             }
-            if (!verifySignature(e)) {
+            if (!verifySignature(e, algorithm, verificationKeys)) {
                 log.warn("AuditLog chain check failed: signature did not verify at sequenceNumber {}", e.sequenceNumber());
                 return false;
             }
@@ -520,48 +579,64 @@ public class AppendOnlyFileAuditLog implements AuditLog {
     }
 
     /**
-     * Verify an entry's signature against the gatekeeper's active key.
-     *
-     * <p>Limitation: when the gatekeeper rotates its signing key, entries
-     * older than the rotation will fail this check because they were
-     * signed under a now-retired key. A future iteration should consult
-     * {@code GatekeeperKeyDirectory} and try each retired key in turn.
-     * The current implementation suffices for a deployment that has not
-     * yet rotated; rotation triggers a clean re-anchor of the chain so
-     * the issue is also catchable by {@code /v1/gatekeeper/anchor}.</p>
+     * Verify an entry's signature with the signer's algorithm against the
+     * active key and every retired key in turn. An entry passes if any of
+     * them verifies it: entries written before a rotation are signed under
+     * a key that is now retired.
      */
-    private boolean verifySignature(AuditEntry e) {
+    private boolean verifySignature(AuditEntry e, String algorithm, List<PublicKey> verificationKeys) {
+        byte[] sig;
         try {
-            CertificateFactory cf = CertificateFactory.getInstance("X.509");
-            X509Certificate cert = (X509Certificate) cf.generateCertificate(
-                    new ByteArrayInputStream(signer.getSigningCertificatePem().getBytes(StandardCharsets.UTF_8)));
-            String algorithm = pickAlgorithmFor(cert.getPublicKey().getAlgorithm());
-            Signature verifier = Signature.getInstance(algorithm);
-            verifier.initVerify(cert.getPublicKey());
-            verifier.update(AuditEntry.canonicalBytesForSignature(e));
-            byte[] sig = Base64.getDecoder().decode(e.entrySignatureBase64());
-            return verifier.verify(sig);
+            sig = Base64.getDecoder().decode(e.entrySignatureBase64());
         } catch (Exception ex) {
-            log.warn("AuditLog signature verification threw an exception at sequenceNumber {}: {}",
+            log.warn("AuditLog signature at sequenceNumber {} is not valid Base64: {}",
                     e.sequenceNumber(), ex.toString());
             return false;
         }
+        byte[] signedBytes = AuditEntry.canonicalBytesForSignature(e);
+        Exception lastFailure = null;
+        for (PublicKey key : verificationKeys) {
+            try {
+                Signature verifier = Signature.getInstance(algorithm);
+                verifier.initVerify(key);
+                verifier.update(signedBytes);
+                if (verifier.verify(sig)) {
+                    return true;
+                }
+            } catch (Exception ex) {
+                lastFailure = ex;
+            }
+        }
+        if (lastFailure != null) {
+            log.warn("AuditLog signature verification threw an exception at sequenceNumber {}: {}",
+                    e.sequenceNumber(), lastFailure.toString());
+        }
+        return false;
     }
 
-    /**
-     * Pick a verification algorithm consistent with the signer's signing
-     * algorithm. The {@link AuditLog} contract specifies SHA256withRSA
-     * (or SHA256withECDSA when the signer is bound to an EC key); deployments
-     * that wire {@link ReceiptSigner} with PSS or SHA384 must update this
-     * mapping in lock-step. The lock-step is acceptable here because the
-     * configuration is deployment-time and verifyChainIntegrity() is
-     * exercised by the gatekeeper's own startup hook.
-     */
-    private static String pickAlgorithmFor(String keyAlg) {
-        if ("EC".equalsIgnoreCase(keyAlg)) {
-            return "SHA256withECDSA";
+    private List<PublicKey> verificationKeys() {
+        List<PublicKey> keys = new ArrayList<>();
+        addCertificateKey(keys, signer.getSigningCertificatePem());
+        if (keyDirectory != null) {
+            for (GatekeeperKeyDirectory.KeyEntry key : keyDirectory.allKeys()) {
+                if ("RETIRED".equals(key.status())) {
+                    addCertificateKey(keys, key.certificatePem());
+                }
+            }
         }
-        return "SHA256withRSA";
+        return keys;
+    }
+
+    private static void addCertificateKey(List<PublicKey> keys, String certificatePem) {
+        try {
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            X509Certificate cert = (X509Certificate) cf.generateCertificate(
+                    new ByteArrayInputStream(certificatePem.getBytes(StandardCharsets.UTF_8)));
+            keys.add(cert.getPublicKey());
+        } catch (Exception ex) {
+            log.warn("AuditLog: signing certificate could not be parsed and is not used for "
+                    + "chain verification: {}", ex.toString());
+        }
     }
 
     private static String sha256Hex(byte[] in) {

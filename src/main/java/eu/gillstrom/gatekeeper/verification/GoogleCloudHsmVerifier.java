@@ -357,16 +357,17 @@ public class GoogleCloudHsmVerifier implements HsmAttestationVerifier {
 
             // Absence of the extractability tag is not evidence of
             // non-extractability. Without it the field default (false) would be
-            // mistaken for a verified attribute and keyOrigin would be set to
-            // "generated" on no evidence at all, satisfying two compliance
-            // conjuncts that were never checked. Fail closed instead.
+            // mistaken for a verified attribute, satisfying a compliance
+            // conjunct that was never checked. Fail closed instead.
+            result.setKeyOrigin("unverified");
             if (!extractableSeen) {
-                result.setKeyOrigin("unverified");
                 result.addError("GOOGLE_ATTRIBUTES_UNVERIFIED: attestation carries no "
                         + "extractability attribute (tag 0x0162) - key origin and "
                         + "exportability could not be established");
-            } else if (!result.isExtractable()) {
-                result.setKeyOrigin("generated");
+            } else {
+                result.addError("GOOGLE_KEY_ORIGIN_UNVERIFIED: no key-origin attribute is "
+                        + "parsed from the attestation - generation on the device could "
+                        + "not be established");
             }
 
         } catch (Exception e) {

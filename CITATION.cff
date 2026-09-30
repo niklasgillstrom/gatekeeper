@@ -19,14 +19,22 @@ abstract: >-
   path and to the mTLS principal that performed the verification, consumes
   the nonce atomically, makes settlement compliance follow the
   confirmation outcome, and caches chain-integrity checks behind a
-  supervisor-only health endpoint. Supports the data-minimised quadruple-
+  supervisor-only health endpoint. Version 1.5.0 makes the settlement
+  contract with railgate work end to end by storing the certificate
+  confirmed at Step 7 and resolving it from serial number and issuer DN
+  (lockstep upgrade with hsm 1.5.0 and railgate 1.5.0 required), reads
+  YubiHSM capabilities big-endian and rejects re-imported keys, makes every
+  DORA article bit depend on a valid attestation signature, builds
+  issuer-CA paths through intermediate certificates, and verifies audit-log
+  integrity against the file on disk with the configured algorithm and
+  retired keys. Supports the data-minimised quadruple-
   triangulation model: only digest, signature, and certificate identifiers
   traverse the supervisor boundary — transaction payload content is never
   exposed to the supervisor. Companions: hsm (financial-entity-side HSM
   attestation verification) and railgate (central-bank settlement-rail
   enforcement).
-version: "1.4.0"
-date-released: "2026-09-02"
+version: "1.5.0"
+date-released: "2026-09-30"
 license: MIT
 repository-code: "https://github.com/niklasgillstrom/gatekeeper"
 authors:

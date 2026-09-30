@@ -75,6 +75,7 @@ public class IssuanceConfirmationResponse {
         /** ANOMALY: Public key in certificate does not match attestation. */
         ANOMALY_PUBLIC_KEY_MISMATCH,
         /** ANOMALY: Confirmation received for unknown verification ID. */
-        ANOMALY_UNKNOWN_VERIFICATION
+        ANOMALY_UNKNOWN_VERIFICATION,
+        ANOMALY_NONCE_MISMATCH
     }
 }

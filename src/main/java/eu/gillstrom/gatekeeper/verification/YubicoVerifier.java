@@ -171,7 +171,8 @@ public class YubicoVerifier implements HsmAttestationVerifier {
             }
 
             result.setValid(result.isChainValid() && result.isPublicKeyMatch()
-                    && result.isGenerated() && !result.isKeyExportable()
+                    && result.isGenerated() && !result.isImported() && !result.isImportedWrapped()
+                    && !result.isKeyExportable()
                     && result.getErrors().isEmpty());
 
         } catch (Exception e) {
@@ -261,25 +262,11 @@ public class YubicoVerifier implements HsmAttestationVerifier {
                     }
                     case ORIGIN_OID -> {
                         ASN1BitString bs = ASN1BitString.getInstance(content);
-                        byte[] originBytes = bs.getBytes();
-                        if (originBytes.length > 0) {
-                            int originBits = originBytes[0] & 0xFF;
-                            result.setGenerated((originBits & 0x01) != 0);
-                            result.setImported((originBits & 0x02) != 0);
-                            result.setImportedWrapped((originBits & 0x10) != 0);
-                        }
+                        applyOrigin(bs.getBytes(), result);
                     }
                     case CAPABILITIES_OID -> {
                         ASN1BitString bs = ASN1BitString.getInstance(content);
-                        byte[] capBytes = bs.getBytes();
-                        long caps = 0;
-                        for (int i = 0; i < Math.min(capBytes.length, 8); i++) {
-                            caps |= ((long) (capBytes[i] & 0xFF)) << (8 * i);
-                        }
-                        boolean canExportWrapped = (caps & (1L << EXPORT_WRAPPED_BIT)) != 0;
-                        boolean exportableUnderWrap = (caps & (1L << EXPORTABLE_UNDER_WRAP_BIT)) != 0;
-                        result.setExportableUnderWrap(exportableUnderWrap);
-                        result.setCanExportWrapped(canExportWrapped);
+                        applyCapabilities(bs.getBytes(), result);
                     }
                     case LABEL_OID -> {
                         ASN1UTF8String label = ASN1UTF8String.getInstance(content);
@@ -292,17 +279,44 @@ public class YubicoVerifier implements HsmAttestationVerifier {
                 }
             }
 
-            // Validate key origin and exportability
-            if (!result.isGenerated()) {
-                result.addError("Key was not generated on HSM (origin: " + result.getKeyOrigin() + ")");
-            }
-            if (result.isExportableUnderWrap() || result.isCanExportWrapped()) {
-                result.addError("Key has export capabilities - not allowed for signing keys");
-            }
+            validateKeyAttributes(result);
 
         } catch (Exception e) {
             log.warn("Failed to parse Yubico attestation extensions: {}", e.getMessage());
             result.addError("Failed to parse attestation extensions: " + e.getMessage());
+        }
+    }
+
+    static long parseCapabilities(byte[] capBytes) {
+        long caps = 0;
+        for (byte b : capBytes) {
+            caps = (caps << 8) | (b & 0xFF);
+        }
+        return caps;
+    }
+
+    static void applyCapabilities(byte[] capBytes, YubicoAttestationResult result) {
+        long caps = parseCapabilities(capBytes);
+        result.setCanExportWrapped((caps & (1L << EXPORT_WRAPPED_BIT)) != 0);
+        result.setExportableUnderWrap((caps & (1L << EXPORTABLE_UNDER_WRAP_BIT)) != 0);
+    }
+
+    static void applyOrigin(byte[] originBytes, YubicoAttestationResult result) {
+        if (originBytes.length > 0) {
+            int originBits = originBytes[0] & 0xFF;
+            result.setGenerated((originBits & 0x01) != 0);
+            result.setImported((originBits & 0x02) != 0);
+            result.setImportedWrapped((originBits & 0x10) != 0);
+        }
+    }
+
+    static void validateKeyAttributes(YubicoAttestationResult result) {
+        if (!result.isGenerated() || result.isImported() || result.isImportedWrapped()) {
+            result.addError("Key was not generated on this HSM without import (origin: "
+                    + result.getKeyOrigin() + ")");
+        }
+        if (result.isExportableUnderWrap() || result.isCanExportWrapped()) {
+            result.addError("Key has export capabilities - not allowed for signing keys");
         }
     }
 
@@ -451,12 +465,12 @@ public class YubicoVerifier implements HsmAttestationVerifier {
         }
 
         public String getKeyOrigin() {
-            if (generated)
-                return "generated";
             if (importedWrapped)
                 return "imported_wrapped";
             if (imported)
                 return "imported";
+            if (generated)
+                return "generated";
             return "unknown";
         }
 

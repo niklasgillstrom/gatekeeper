@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        The Spring Boot parent is used only for plugin and dependency version
+        management, so that the harness resolves the same surefire, compiler and
+        JUnit versions the three services already build with. The harness does
+        not depend on hsm, gatekeeper or railgate as libraries; it starts their
+        fat jars as child processes. See README.md.
+
+        OWASP dependency-check is deliberately not declared here.
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.1</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>eu.gillstrom</groupId>
+    <artifactId>e2e</artifactId>
+    <version>1.5.0</version>
+    <name>Local end-to-end harness (hsm, gatekeeper, railgate)</name>
+    <description>
+        Local-only test harness. Starts the already-built hsm, gatekeeper and
+        railgate fat jars as child processes on free loopback ports and drives
+        the issuance and settlement flow over HTTP. Deploys nothing.
+    </description>
+
+    <properties>
+        <java.version>21</java.version>
+        <e2e.jackson.version>2.21.5</e2e.jackson.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${e2e.jackson.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <trimStackTrace>false</trimStackTrace>
+                    <forkedProcessExitTimeoutInSeconds>60</forkedProcessExitTimeoutInSeconds>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <skipIfEmpty>true</skipIfEmpty>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

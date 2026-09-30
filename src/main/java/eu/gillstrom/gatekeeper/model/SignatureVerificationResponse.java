@@ -19,7 +19,9 @@ import lombok.NoArgsConstructor;
  * <p>{@code reason} is one of:
  * <ul>
  *   <li>{@code OK} — verification passed</li>
- *   <li>{@code CERT_NOT_FOUND} — no audit entry for this certSerial</li>
+ *   <li>{@code CERT_NOT_FOUND} — no certificate stored at Step 7 for
+ *       {@code (certSerial, issuerDn)}, or no registry entry for the
+ *       certificate's public key</li>
  *   <li>{@code SIGNATURE_INVALID} — cryptographic verification failed</li>
  *   <li>{@code CERT_NON_COMPLIANT} — cert exists but did not pass
  *       structural compliance at issuance</li>
@@ -40,4 +42,6 @@ public class SignatureVerificationResponse {
     private String auditEntryId;
 
     private String reason;
+
+    private String auditEntryHashHex;
 }

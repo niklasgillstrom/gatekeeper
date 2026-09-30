@@ -6,6 +6,8 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.model.IssuanceConfirmationResponse.RegistryStatus;
 
+import javax.security.auth.x500.X500Principal;
+import java.math.BigInteger;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -91,10 +93,11 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
                                            String submittedNonce,
                                            boolean issued,
                                            String actualPublicKeyFingerprint,
-                                           boolean publicKeyMatch) {
+                                           boolean publicKeyMatch,
+                                           IssuedCertificate issuedCertificate) {
         synchronized (confirmLock) {
             return confirmLocked(verificationId, submittedNonce, issued,
-                    actualPublicKeyFingerprint, publicKeyMatch);
+                    actualPublicKeyFingerprint, publicKeyMatch, issuedCertificate);
         }
     }
 
@@ -102,7 +105,8 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
                                                   String submittedNonce,
                                                   boolean issued,
                                                   String actualPublicKeyFingerprint,
-                                                  boolean publicKeyMatch) {
+                                                  boolean publicKeyMatch,
+                                                  IssuedCertificate issuedCertificate) {
         RegistryEntry entry = entries.get(verificationId);
         if (entry == null) {
             return Optional.empty();
@@ -131,6 +135,11 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
         if (entry.isCompliant() && issued && publicKeyMatch) {
             entry.setStatus(RegistryStatus.VERIFIED_AND_ISSUED);
             entry.setActualPublicKeyFingerprint(actualPublicKeyFingerprint);
+            if (issuedCertificate != null) {
+                entry.setIssuedCertificatePem(issuedCertificate.pem());
+                entry.setIssuedCertificateSerial(issuedCertificate.serialHex());
+                entry.setIssuedCertificateIssuerDn(issuedCertificate.issuerDn());
+            }
         } else if (entry.isCompliant() && issued && !publicKeyMatch) {
             entry.setStatus(RegistryStatus.ANOMALY_PUBLIC_KEY_MISMATCH);
             entry.setActualPublicKeyFingerprint(actualPublicKeyFingerprint);
@@ -195,14 +204,21 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
                 .filter(e -> fingerprint.equals(e.getPublicKeyFingerprint())
                         || fingerprint.equals(e.getActualPublicKeyFingerprint()))
                 .filter(RegistryEntry::isCompliant)
-                .findFirst();
+                .max(ApprovalRegistry.recency());
         if (compliantMatch.isPresent()) {
             return compliantMatch;
         }
         return entries.values().stream()
                 .filter(e -> fingerprint.equals(e.getPublicKeyFingerprint())
                         || fingerprint.equals(e.getActualPublicKeyFingerprint()))
-                .findFirst();
+                .max(ApprovalRegistry.recency());
+    }
+
+    @Override
+    public Optional<RegistryEntry> findByIssuedCertificate(BigInteger serial, X500Principal issuer) {
+        return entries.values().stream()
+                .filter(e -> ApprovalRegistry.issuedCertificateMatches(e, serial, issuer))
+                .max(ApprovalRegistry.recency());
     }
 
     @Override

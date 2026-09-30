@@ -22,6 +22,8 @@ import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.cert.X509Certificate;
+import java.security.spec.MGF1ParameterSpec;
+import java.security.spec.PSSParameterSpec;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
@@ -188,15 +190,56 @@ class SignatureVerificationServiceTest {
     }
 
     @Test
-    void deniesWhenSigningCertificatePemIsMissing() throws Exception {
+    void deniesWhenNeitherSigningCertificatePemNorSerialAndIssuerArePresent() throws Exception {
         SignatureVerificationRequest request = signedRequest("payload-E");
         request.setSigningCertificatePem(null);
+        request.setCertSerial(null);
 
         SignatureVerificationResponse response = service.verify(request);
 
         assertThat(response.isSignatureValid()).isFalse();
         assertThat(response.isCompliant()).isFalse();
         assertThat(response.getReason()).isEqualTo("MALFORMED_INPUT");
+    }
+
+    @Test
+    void deniesAsCertNotFoundWhenSigningCertificatePemIsMissingAndNoCertificateIsStored() throws Exception {
+        registry.put(publicKeyFingerprint,
+                buildEntry("VID-NO-PEM", true, RegistryStatus.VERIFIED_AND_ISSUED));
+        SignatureVerificationRequest request = signedRequest("payload-E2");
+        request.setSigningCertificatePem(null);
+
+        SignatureVerificationResponse response = service.verify(request);
+
+        assertThat(response.isSignatureValid()).isFalse();
+        assertThat(response.isCompliant()).isFalse();
+        assertThat(response.getReason()).isEqualTo("CERT_NOT_FOUND");
+    }
+
+    @Test
+    void rsassaPssSignatureVerifiesWithSha512Mgf1AndA64ByteSalt() throws Exception {
+        registry.put(publicKeyFingerprint,
+                buildEntry("VID-PSS", true, RegistryStatus.VERIFIED_AND_ISSUED));
+        byte[] digest = MessageDigest.getInstance("SHA-512")
+                .digest("payload-PSS".getBytes(StandardCharsets.UTF_8));
+        Signature sig = Signature.getInstance("RSASSA-PSS");
+        sig.setParameter(new PSSParameterSpec("SHA-512", "MGF1", MGF1ParameterSpec.SHA512, 64, 1));
+        sig.initSign(signingKeyPair.getPrivate());
+        sig.update(digest);
+        SignatureVerificationRequest request = SignatureVerificationRequest.builder()
+                .certSerial(signingCert.getSerialNumber().toString(16))
+                .issuerDn(signingCert.getIssuerX500Principal().getName())
+                .digestHex(HexFormat.of().formatHex(digest))
+                .signatureBase64(Base64.getEncoder().encodeToString(sig.sign()))
+                .signingCertificatePem(signingCertPem)
+                .algorithm("RSASSA-PSS")
+                .build();
+
+        SignatureVerificationResponse response = service.verify(request);
+
+        assertThat(response.getReason()).isEqualTo("OK");
+        assertThat(response.isSignatureValid()).isTrue();
+        assertThat(response.isCompliant()).isTrue();
     }
 
     @Test
@@ -277,6 +320,29 @@ class SignatureVerificationServiceTest {
         // otherwise the digest is not a witness to anything.
         assertThat(entries.get(0).requestDigestBase64())
                 .isNotEqualTo(entries.get(1).requestDigestBase64());
+    }
+
+    @Test
+    void responseCarriesTheHashOfItsOwnSettlementAuditEntry() throws Exception {
+        SignatureVerificationResponse notFound = service.verify(signedRequest("payload-R"));
+        assertThat(notFound.getReason()).isEqualTo("CERT_NOT_FOUND");
+        assertThat(notFound.getAuditEntryId()).isNull();
+        assertThat(notFound.getAuditEntryHashHex())
+                .isEqualTo(auditLog.head().orElseThrow().thisEntryHashHex());
+
+        registry.put(publicKeyFingerprint,
+                buildEntry("VID-HASH", true, RegistryStatus.VERIFIED_AND_ISSUED));
+
+        SignatureVerificationResponse first = service.verify(signedRequest("payload-P"));
+        AuditEntry firstEntry = auditLog.head().orElseThrow();
+        SignatureVerificationResponse second = service.verify(signedRequest("payload-Q"));
+        AuditEntry secondEntry = auditLog.head().orElseThrow();
+
+        assertThat(first.getAuditEntryId()).isEqualTo("VID-HASH");
+        assertThat(second.getAuditEntryId()).isEqualTo("VID-HASH");
+        assertThat(first.getAuditEntryHashHex()).isEqualTo(firstEntry.thisEntryHashHex());
+        assertThat(second.getAuditEntryHashHex()).isEqualTo(secondEntry.thisEntryHashHex());
+        assertThat(first.getAuditEntryHashHex()).isNotEqualTo(second.getAuditEntryHashHex());
     }
 
     @Test
@@ -402,7 +468,8 @@ class SignatureVerificationServiceTest {
 
         @Override
         public Optional<RegistryEntry> confirm(String verificationId, String submittedNonce,
-                boolean issued, String actualPublicKeyFingerprint, boolean publicKeyMatch) {
+                boolean issued, String actualPublicKeyFingerprint, boolean publicKeyMatch,
+                IssuedCertificate issuedCertificate) {
             throw new UnsupportedOperationException();
         }
 

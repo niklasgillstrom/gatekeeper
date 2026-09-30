@@ -146,7 +146,7 @@ gatekeeper:
     keystore-path: ${GATEKEEPER_SEAL_KEYSTORE:/etc/gatekeeper/nca-seal.p12}
     keystore-password: ${GATEKEEPER_SEAL_KEYSTORE_PASSWORD:}
     key-alias: ${GATEKEEPER_SEAL_ALIAS:nca-seal}
-    # SHA256withRSA / SHA384withECDSA / SHA256withRSAandMGF1 (PSS)
+    # SHA256withRSA / SHA384withRSA / SHA256withECDSA / SHA384withECDSA
     algorithm: SHA256withRSA
     # Comma-separated PEMs of historical signing certificates that
     # have been retired. Receipts and audit anchors signed under

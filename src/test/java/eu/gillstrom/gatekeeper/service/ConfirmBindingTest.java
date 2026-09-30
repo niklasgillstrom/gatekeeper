@@ -1,6 +1,7 @@
 package eu.gillstrom.gatekeeper.service;
 
 import eu.gillstrom.gatekeeper.audit.AppendOnlyFileAuditLog;
+import eu.gillstrom.gatekeeper.audit.AuditEntry;
 import eu.gillstrom.gatekeeper.audit.MtlsPrincipalResolver;
 import eu.gillstrom.gatekeeper.model.IssuanceConfirmation;
 import eu.gillstrom.gatekeeper.model.IssuanceConfirmationResponse;
@@ -18,6 +19,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -206,5 +208,23 @@ class ConfirmBindingTest {
 
         assertThat(service.confirmIssuance(nonIssuanceNotice("SE-7"), "SE").getRegistryStatus())
                 .isEqualTo(RegistryStatus.VERIFIED_NOT_ISSUED);
+    }
+
+    @Test
+    void nonceMismatchIsWrittenToTheAuditLog() {
+        registerSwedishEntry("SE-8");
+        when(principalResolver.currentPrincipal()).thenReturn(VERIFIER_PRINCIPAL);
+        VerificationService service = serviceWithMtls(true);
+        IssuanceConfirmation replayed = nonIssuanceNotice("SE-8");
+        replayed.setConfirmationNonce("not-the-bound-nonce");
+
+        assertThatThrownBy(() -> service.confirmIssuance(replayed, "SE"))
+                .isInstanceOf(ApprovalRegistry.NonceMismatchException.class);
+
+        AuditEntry entry = auditLog.findByVerificationId("SE-8").orElseThrow();
+        assertThat(entry.operation()).isEqualTo("CONFIRM");
+        assertThat(entry.compliant()).isFalse();
+        assertThat(entry.mtlsClientPrincipal()).isEqualTo(VERIFIER_PRINCIPAL);
+        assertThat(registry.lookup("SE-8").orElseThrow().getStatus()).isNull();
     }
 }

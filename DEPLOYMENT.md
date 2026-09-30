@@ -24,7 +24,7 @@ mvn -U clean package
 mvn -U clean package -Ddependency-check.skip=true
 ```
 
-The artefact lands in `target/gatekeeper-1.4.0.jar`.
+The artefact lands in `target/gatekeeper-1.5.0.jar`.
 
 ### 1.2 Runtime environment (production host)
 
@@ -67,7 +67,9 @@ Typically contains:
 
 Holds the **CA certificates that the gatekeeper accepts as legitimate issuers** for the certificates the FE confirms back via `gatekeeper.confirm` (Step 7). Typically the certificate-issuing CA at the FE — e.g., GetSwish AB's internal payment-cert CA in the Swish architecture.
 
-A sample `issuer-ca-bundle.pem` ships in the classpath as a placeholder. Production deployments override the path to point at the operator-controlled bundle.
+A bundle certificate that is issued by another certificate in the same bundle is used as an intermediate; every other bundle certificate is a trust anchor. At Step 7 the gatekeeper builds a PKIX path from the submitted certificate to a trust anchor, using as intermediates the bundle's intermediates and any further certificates the FE sends after the signing certificate in `signingCertificatePem`.
+
+A sample `issuer-ca-bundle.pem` ships in the classpath as a placeholder: Getswish Root CA v2 for Swish as trust anchor and Swish Customer CA1 v2 for Swish, the CA that issues Swish signing certificates, as intermediate. Production deployments override the path to point at the operator-controlled bundle.
 
 ---
 
@@ -85,7 +87,7 @@ A sample `issuer-ca-bundle.pem` ships in the classpath as a placeholder. Product
 | `GATEKEEPER_TRUSTSTORE_PASSWORD` | Password for above | Yes | (from secrets manager) |
 | `GATEKEEPER_AUDIT_PATH` | Path to the hash-chained audit log journal | No (has default) | `/var/lib/gatekeeper/audit-log.jsonl` |
 | `GATEKEEPER_REGISTRY_PATH` | Path to the file-backed approval-registry journal | No (has default) | `/var/lib/gatekeeper/approval-registry.jsonl` |
-| `GATEKEEPER_RETIRED_KEYS` | Comma-separated PEMs of historical signing certs (for retroactive verification of receipts within retention window) | No (empty default) | (multiline PEM block, newlines as `\n`) |
+| `GATEKEEPER_RETIRED_KEYS` | Comma-separated PEMs of historical signing certs (for retroactive verification of receipts within retention window; the audit-chain integrity check also accepts entry signatures under them). Never list a compromised key (§9) | No (empty default) | (multiline PEM block, newlines as `\n`) |
 | `NVD_API_KEY` | NVD API key for OWASP scans (build/CI side) | Recommended | (from NVD) |
 
 Production secrets (`*_PASSWORD`) MUST come from the NCA's secrets manager, not from a checked-in file. The `application-nca.yaml` references them via `${ENV_VAR:default}` so a secrets injector that exposes them as environment variables (Kubernetes Secret → env, HashiCorp Vault Agent, etc.) works without modification.
@@ -192,7 +194,7 @@ The first startup of a new deployment should follow this sequence to verify the 
 
 ```bash
 # 1. Verify the JAR exists and has the right version
-java -jar target/gatekeeper-1.4.0.jar --version 2>&1 | head
+java -jar target/gatekeeper-1.5.0.jar --version 2>&1 | head
 
 # 2. Pre-flight: keystore reachability and password correctness
 keytool -list -keystore "$GATEKEEPER_SEAL_KEYSTORE" -storepass "$GATEKEEPER_SEAL_KEYSTORE_PASSWORD" -storetype PKCS12
@@ -200,7 +202,7 @@ keytool -list -keystore "$GATEKEEPER_SERVER_KEYSTORE" -storepass "$GATEKEEPER_SE
 keytool -list -keystore "$GATEKEEPER_TRUSTSTORE" -storepass "$GATEKEEPER_TRUSTSTORE_PASSWORD" -storetype PKCS12
 
 # 3. Boot with the NCA profile
-java -jar target/gatekeeper-1.4.0.jar --spring.profiles.active=nca
+java -jar target/gatekeeper-1.5.0.jar --spring.profiles.active=nca
 
 # 4. In another shell, smoke-test the public endpoints (no client cert needed)
 curl -s --cacert <server-CA> https://gatekeeper.fi.se:8443/v1/gatekeeper/health
@@ -291,7 +293,7 @@ The approval registry can be reconstructed from a clean state if the file is los
 Two failure modes:
 
 - **Journal corruption (mid-file).** Detected at startup. The service still boots so that supervisors can retrieve evidence and operate normally; the chain-integrity warning surfaces in logs and on the `/v1/gatekeeper/anchor` endpoint. The operator must investigate manually — typical cause is filesystem-level damage. Restore from backup.
-- **Active signing key compromise.** Add the compromised certificate to `GATEKEEPER_RETIRED_KEYS` so it remains discoverable for retroactive verification, provision a new key in the secure key store (Section 2.3 of `SUPERVISORY_OPERATIONS.md`), publish the new key via the next chain anchor, and notify supervisees via the supervisor-cooperation channel. Periodic data triangulation (`SUPERVISORY_OPERATIONS.md` §3.5) will surface any receipts an attacker minted under the compromised key in the window between compromise and rotation.
+- **Active signing key compromise.** Do **not** add the compromised certificate to `GATEKEEPER_RETIRED_KEYS`: the audit-chain integrity check accepts entry signatures under every retired key, so listing it would let entries forged under it pass (this document said the opposite before 1.5.0, and it contradicted `SUPERVISORY_OPERATIONS.md` §2.3 even then). Publish a compromise notice naming its fingerprint, provision a new key in the secure key store (Section 2.3 of `SUPERVISORY_OPERATIONS.md`), publish the new key via the next chain anchor, and notify supervisees via the supervisor-cooperation channel. Periodic data triangulation (`SUPERVISORY_OPERATIONS.md` §3.5) will surface any receipts an attacker minted under the compromised key in the window between compromise and rotation.
 
 ---
 

@@ -166,6 +166,7 @@ public class VerificationService {
         // Perform vendor-specific attestation verification
         boolean publicKeyMatch = false;
         boolean attestationChainValid = false;
+        boolean attestationSignatureValid = false;
         boolean generatedOnDevice = false;
         boolean exportable = true;
         String hsmModel = null;
@@ -192,7 +193,9 @@ public class VerificationService {
                         publicKey);
                 publicKeyMatch = result.isPublicKeyMatch();
                 attestationChainValid = result.isChainValid();
-                generatedOnDevice = true; // Securosys: never_extractable=true means generated on device
+                attestationSignatureValid = result.isSignatureValid();
+                generatedOnDevice = result.isSignatureValid()
+                        && result.isNeverExtractable() && result.isAlwaysSensitive();
                 exportable = result.isExtractable();
                 hsmModel = "Primus HSM";
                 hsmSerial = result.getHsmSerialNumber();
@@ -210,6 +213,7 @@ public class VerificationService {
                         publicKey);
                 publicKeyMatch = result.isPublicKeyMatch();
                 attestationChainValid = result.isChainValid();
+                attestationSignatureValid = result.isChainValid();
                 generatedOnDevice = "generated".equals(result.getKeyOrigin());
                 exportable = result.isKeyExportable();
                 hsmModel = "YubiHSM 2";
@@ -228,6 +232,7 @@ public class VerificationService {
                         publicKey);
                 publicKeyMatch = result.isPublicKeyMatch();
                 attestationChainValid = result.isChainValid();
+                attestationSignatureValid = result.isSignatureValid();
                 generatedOnDevice = "generated".equals(result.getKeyOrigin());
                 exportable = result.isExportable();
                 hsmModel = "Azure Managed HSM";
@@ -247,6 +252,7 @@ public class VerificationService {
                         publicKey);
                 publicKeyMatch = result.isPublicKeyMatch();
                 attestationChainValid = result.isChainValid();
+                attestationSignatureValid = result.isSignatureValid();
                 generatedOnDevice = "generated".equals(result.getKeyOrigin());
                 exportable = result.isExtractable();
                 hsmModel = "Google Cloud HSM";
@@ -259,11 +265,12 @@ public class VerificationService {
 
         // Determine compliance
         boolean compliant = errors.isEmpty() && publicKeyMatch && attestationChainValid
-                && generatedOnDevice && !exportable;
+                && attestationSignatureValid && generatedOnDevice && !exportable;
 
         // Build DORA compliance mapping
         DoraCompliance doraCompliance = buildDoraCompliance(
-                compliant, publicKeyMatch, attestationChainValid, generatedOnDevice, exportable);
+                compliant, publicKeyMatch, attestationChainValid, attestationSignatureValid,
+                generatedOnDevice, exportable);
 
         // Key properties
         KeyProperties keyProperties = KeyProperties.builder()
@@ -274,11 +281,11 @@ public class VerificationService {
                 .build();
 
         // Warnings for edge cases
-        if (exportable && attestationChainValid) {
+        if (exportable && attestationChainValid && attestationSignatureValid) {
             warnings.add("CRITICAL: Key is marked as exportable. Even though HSM attestation is valid, "
                     + "an exportable key provides no security guarantee as it may have been copied outside the HSM boundary.");
         }
-        if (!generatedOnDevice && attestationChainValid) {
+        if (!generatedOnDevice && attestationChainValid && attestationSignatureValid) {
             warnings.add("Key was imported into HSM, not generated on-device. "
                     + "Key may have existed in software before import, compromising security guarantees.");
         }
@@ -379,30 +386,30 @@ public class VerificationService {
     }
 
     private DoraCompliance buildDoraCompliance(boolean compliant, boolean publicKeyMatch,
-            boolean chainValid, boolean generatedOnDevice, boolean exportable) {
+            boolean chainValid, boolean signatureValid, boolean generatedOnDevice, boolean exportable) {
 
         // Article 5(2)(b): High standards for authenticity and integrity
         // Cannot be maintained without verified HSM protection
-        boolean art5_2b = chainValid && publicKeyMatch && !exportable;
+        boolean art5_2b = signatureValid && chainValid && publicKeyMatch && !exportable;
 
         // Article 6(10): Full responsibility for verification of compliance
         // "The verification" in definite form presupposes verification occurs
-        boolean art6_10 = chainValid && publicKeyMatch && generatedOnDevice && !exportable;
+        boolean art6_10 = signatureValid && chainValid && publicKeyMatch && generatedOnDevice && !exportable;
 
         // Article 9(3)(c): PREVENT impairment of authenticity and integrity
         // Verb is "prevent" — requires active measure, not passive contractual term
-        boolean art9_3c = chainValid && publicKeyMatch && !exportable;
+        boolean art9_3c = signatureValid && chainValid && publicKeyMatch && !exportable;
 
         // Article 9(3)(d): Protection against poor administration,
         // processing-related risks and the human factor
-        boolean art9_3d = chainValid && generatedOnDevice && !exportable;
+        boolean art9_3d = signatureValid && chainValid && generatedOnDevice && !exportable;
 
         // Article 9(4)(d): Strong authentication mechanisms with dedicated control systems
-        boolean art9_4d = chainValid && publicKeyMatch && generatedOnDevice && !exportable;
+        boolean art9_4d = signatureValid && chainValid && publicKeyMatch && generatedOnDevice && !exportable;
 
         // Article 28(1)(a): Full responsibility at all times regardless of
         // contractual arrangements
-        boolean art28_1a = compliant;
+        boolean art28_1a = signatureValid && compliant;
 
         String summary;
         if (compliant) {
@@ -413,6 +420,8 @@ public class VerificationService {
             List<String> failures = new ArrayList<>();
             if (!chainValid)
                 failures.add("attestation chain invalid");
+            if (!signatureValid)
+                failures.add("attestation signature invalid");
             if (!publicKeyMatch)
                 failures.add("public key does not match attestation");
             if (!generatedOnDevice)
@@ -658,6 +667,7 @@ public class VerificationService {
      * Anomalies are detected and flagged:
      * - Certificate issued despite NON-COMPLIANT attestation
      * - Public key in certificate does not match approved attestation
+     * - Issuance confirmed without a signing certificate
      * - Confirmation for unknown verification ID
      *
      * <p>Two bindings gate the lookup before any of that runs. The
@@ -717,18 +727,27 @@ public class VerificationService {
         String actualFingerprint = null;
         boolean publicKeyMatch = false;
 
-        if (confirmation.isIssued() && confirmation.getSigningCertificatePem() != null) {
+        ApprovalRegistry.IssuedCertificate issuedCertificate = null;
+
+        if (confirmation.isIssued()
+                && (confirmation.getSigningCertificatePem() == null
+                        || confirmation.getSigningCertificatePem().isBlank())) {
+            anomalies.add("ANOMALY: Issuance confirmed without a signing certificate. The public "
+                    + "key of the issued certificate cannot be compared with the attestation "
+                    + "evidence approved in verification " + confirmation.getVerificationId());
+        } else if (confirmation.isIssued()) {
             // Extract public key from the submitted certificate and compare
             try {
-                java.security.cert.X509Certificate submittedCert =
-                        parseX509Certificate(confirmation.getSigningCertificatePem());
+                List<java.security.cert.X509Certificate> submittedChain =
+                        parseX509Certificates(confirmation.getSigningCertificatePem());
+                java.security.cert.X509Certificate submittedCert = submittedChain.get(0);
 
                 // Bind the Step 7 confirmation to the known issuer CA set:
                 // the submitted certificate must chain to a trusted issuer
                 // CA (e.g. Getswish Root CA v2), otherwise an attacker who
                 // knows only the verificationId can submit arbitrary
                 // certificates. Fail-closed.
-                if (!issuerCaValidator.validate(submittedCert)) {
+                if (!issuerCaValidator.validateChain(submittedChain)) {
                     anomalies.add("ANOMALY: Submitted signing certificate is not issued by a trusted "
                             + "issuer CA (PKIX validation failed against the configured "
                             + "gatekeeper.confirmation.issuer-ca-bundle-path trust anchors).");
@@ -751,6 +770,8 @@ public class VerificationService {
                         anomalies.add("ANOMALY: Public key in issued certificate does not match "
                                 + "the attestation evidence approved in verification "
                                 + confirmation.getVerificationId());
+                    } else {
+                        issuedCertificate = ApprovalRegistry.IssuedCertificate.of(submittedCert);
                     }
                 }
             } catch (Exception e) {
@@ -767,13 +788,28 @@ public class VerificationService {
 
         // Update the registry entry with confirmation result. The registry
         // verifies the submitted nonce matches the one bound at verify time
-        // and throws NonceMismatchException on a mismatch (replay attempt).
-        approvalRegistry.confirm(
-                confirmation.getVerificationId(),
-                confirmation.getConfirmationNonce(),
-                confirmation.isIssued(),
-                actualFingerprint,
-                publicKeyMatch);
+        // and throws NonceMismatchException on a mismatch (replay attempt),
+        // which is audit-logged here before it propagates.
+        try {
+            approvalRegistry.confirm(
+                    confirmation.getVerificationId(),
+                    confirmation.getConfirmationNonce(),
+                    confirmation.isIssued(),
+                    actualFingerprint,
+                    publicKeyMatch,
+                    issuedCertificate);
+        } catch (ApprovalRegistry.NonceMismatchException e) {
+            anomalies.add("ANOMALY: Confirmation nonce does not match the nonce bound to "
+                    + "verificationId at verify time. Possible Step-7 replay attempt.");
+            appendConfirmAuditEntry(confirmation, IssuanceConfirmationResponse.builder()
+                    .verificationId(confirmation.getVerificationId())
+                    .loopClosed(false)
+                    .registryStatus(IssuanceConfirmationResponse.RegistryStatus.ANOMALY_NONCE_MISMATCH)
+                    .processedTimestamp(processedTimestamp.toString())
+                    .anomalies(anomalies)
+                    .build());
+            throw e;
+        }
 
         // Determine final status
         IssuanceConfirmationResponse.RegistryStatus finalStatus;
@@ -842,24 +878,32 @@ public class VerificationService {
     // =========================================================================
 
     /**
-     * Parse a PEM-encoded X.509 certificate via the standard JCA
-     * {@link java.security.cert.CertificateFactory}. Using the standard
-     * factory (rather than extracting only the {@link PublicKey} via
-     * BouncyCastle's {@code X509CertificateHolder}) lets callers pass the
-     * parsed certificate to {@link IssuerCaValidator} for PKIX validation
+     * Parse every PEM-encoded X.509 certificate in the submitted string via
+     * the standard JCA {@link java.security.cert.CertificateFactory}, in
+     * order. The first is the issued certificate; any further ones are
+     * intermediates. Using the standard factory (rather than extracting
+     * only the {@link PublicKey} via BouncyCastle's
+     * {@code X509CertificateHolder}) lets callers pass the parsed
+     * certificates to {@link IssuerCaValidator} for PKIX path building
      * against the issuer CA trust anchors.
      */
-    private java.security.cert.X509Certificate parseX509Certificate(String certificatePem) throws Exception {
+    private List<java.security.cert.X509Certificate> parseX509Certificates(String certificatePem) throws Exception {
         java.security.cert.CertificateFactory cf = java.security.cert.CertificateFactory.getInstance("X.509");
         byte[] pemBytes = certificatePem.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        return (java.security.cert.X509Certificate) cf.generateCertificate(
-                new java.io.ByteArrayInputStream(pemBytes));
+        List<java.security.cert.X509Certificate> certificates = new ArrayList<>();
+        for (java.security.cert.Certificate c : cf.generateCertificates(new java.io.ByteArrayInputStream(pemBytes))) {
+            certificates.add((java.security.cert.X509Certificate) c);
+        }
+        if (certificates.isEmpty()) {
+            throw new IllegalArgumentException("No X.509 certificate in signingCertificatePem");
+        }
+        return certificates;
     }
 
     /**
      * Legacy helper kept only for binary compatibility in case any external
      * caller still references the PEMParser-based path; internal flow now
-     * uses {@link #parseX509Certificate(String)} so the parsed certificate
+     * uses {@link #parseX509Certificates(String)} so the parsed certificates
      * can also be PKIX-validated against the issuer CA trust anchors.
      */
     @SuppressWarnings("unused")

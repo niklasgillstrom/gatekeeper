@@ -10,11 +10,13 @@ import java.io.FileInputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.cert.CertPath;
-import java.security.cert.CertPathValidator;
+import java.security.cert.CertPathBuilder;
+import java.security.cert.CertStore;
 import java.security.cert.CertificateFactory;
-import java.security.cert.PKIXParameters;
+import java.security.cert.CollectionCertStoreParameters;
+import java.security.cert.PKIXBuilderParameters;
 import java.security.cert.TrustAnchor;
+import java.security.cert.X509CertSelector;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -43,8 +45,13 @@ import java.util.Set;
  *       for demonstration.</li>
  * </ol>
  *
+ * <p>A bundle certificate that is issued by another certificate in the same
+ * bundle is an intermediate, not a trust anchor: it is offered to the path
+ * builder but a path must still end at one of the anchors. Every other
+ * bundle certificate is a trust anchor.</p>
+ *
  * <p>If neither source yields any usable certificates, the validator loads
- * with an empty anchor set and {@link #validate(X509Certificate)} returns
+ * with an empty anchor set and {@link #validateChain(List)} returns
  * {@code false} for every input. A startup WARN log makes the mis-
  * configuration loud.</p>
  */
@@ -54,10 +61,12 @@ public class IssuerCaValidator {
     private static final Logger log = LoggerFactory.getLogger(IssuerCaValidator.class);
 
     private final Set<TrustAnchor> trustAnchors;
+    private final List<X509Certificate> bundleIntermediates;
 
     public IssuerCaValidator(
             @Value("${gatekeeper.confirmation.issuer-ca-bundle-path:}") String bundlePath) {
         Set<TrustAnchor> anchors = new HashSet<>();
+        List<X509Certificate> intermediates = new ArrayList<>();
         try {
             List<X509Certificate> loaded = new ArrayList<>();
             if (bundlePath != null && !bundlePath.isBlank()) {
@@ -81,7 +90,11 @@ public class IssuerCaValidator {
                 }
             }
             for (X509Certificate c : loaded) {
-                anchors.add(new TrustAnchor(c, null));
+                if (isIssuedByAnotherBundleCertificate(c, loaded)) {
+                    intermediates.add(c);
+                } else {
+                    anchors.add(new TrustAnchor(c, null));
+                }
             }
             if (anchors.isEmpty()) {
                 log.warn("IssuerCaValidator constructed with an EMPTY trust-anchor set. Every "
@@ -89,34 +102,57 @@ public class IssuerCaValidator {
                         + "gatekeeper.confirmation.issuer-ca-bundle-path=/path/to/issuer-ca-bundle.pem "
                         + "or place issuer-ca-bundle.pem on the classpath.");
             } else {
-                log.info("IssuerCaValidator loaded {} issuer CA trust anchor(s).", anchors.size());
+                log.info("IssuerCaValidator loaded {} issuer CA trust anchor(s) and {} intermediate(s).",
+                        anchors.size(), intermediates.size());
             }
         } catch (Exception e) {
             log.error("Failed to load issuer CA bundle — all Step 7 confirmations will be rejected.", e);
         }
         this.trustAnchors = Collections.unmodifiableSet(anchors);
+        this.bundleIntermediates = List.copyOf(intermediates);
+    }
+
+    public boolean validate(X509Certificate cert) {
+        if (cert == null) {
+            return false;
+        }
+        return validateChain(List.of(cert));
     }
 
     /**
-     * PKIX-validate the submitted certificate against the configured issuer
-     * CA trust anchors. Revocation checking is disabled; revocation status
-     * of the signing cert is out of scope for the Step 7 binding check —
-     * the point is simply that the cert must chain to a known issuer.
+     * Build and PKIX-validate a path from the submitted certificate to one
+     * of the configured issuer CA trust anchors. The first element of
+     * {@code submitted} is the certificate under test; any further
+     * elements, together with the intermediates in the bundle, are offered
+     * to the {@link CertPathBuilder} as candidate intermediates. Revocation
+     * checking is disabled; revocation status of the signing cert is out
+     * of scope for the Step 7 binding check — the point is simply that the
+     * cert must chain to a known issuer.
      *
-     * @return true iff the cert chains cryptographically to one of the
-     *         configured issuer CA trust anchors.
+     * @return true iff a path from the first certificate to one of the
+     *         configured issuer CA trust anchors can be built and validated.
      */
-    public boolean validate(X509Certificate cert) {
-        if (cert == null || trustAnchors.isEmpty()) {
+    public boolean validateChain(List<X509Certificate> submitted) {
+        if (submitted == null || submitted.isEmpty() || submitted.get(0) == null
+                || trustAnchors.isEmpty()) {
             return false;
         }
+        X509Certificate cert = submitted.get(0);
         try {
-            CertificateFactory cf = CertificateFactory.getInstance("X.509");
-            CertPath path = cf.generateCertPath(List.of(cert));
-            PKIXParameters params = new PKIXParameters(trustAnchors);
+            List<X509Certificate> candidates = new ArrayList<>();
+            for (X509Certificate c : submitted) {
+                if (c != null) {
+                    candidates.add(c);
+                }
+            }
+            candidates.addAll(bundleIntermediates);
+            X509CertSelector target = new X509CertSelector();
+            target.setCertificate(cert);
+            PKIXBuilderParameters params = new PKIXBuilderParameters(trustAnchors, target);
             params.setRevocationEnabled(false);
-            CertPathValidator v = CertPathValidator.getInstance("PKIX");
-            v.validate(path, params);
+            params.addCertStore(CertStore.getInstance("Collection",
+                    new CollectionCertStoreParameters(candidates)));
+            CertPathBuilder.getInstance("PKIX").build(params);
             return true;
         } catch (Exception e) {
             log.warn("Step 7 issuer-CA validation failed for subject '{}': {}",
@@ -127,6 +163,28 @@ public class IssuerCaValidator {
 
     public int trustAnchorCount() {
         return trustAnchors.size();
+    }
+
+    private static boolean isIssuedByAnotherBundleCertificate(X509Certificate cert,
+                                                              List<X509Certificate> bundle) {
+        if (cert.getSubjectX500Principal().equals(cert.getIssuerX500Principal())) {
+            return false;
+        }
+        for (X509Certificate candidate : bundle) {
+            if (candidate != cert
+                    && candidate.getSubjectX500Principal().equals(cert.getIssuerX500Principal())) {
+                try {
+                    cert.verify(candidate.getPublicKey());
+                    return true;
+                } catch (Exception e) {
+                    log.debug("Bundle certificate '{}' names '{}' as issuer but its signature does "
+                            + "not verify under that certificate's key.",
+                            cert.getSubjectX500Principal().getName(),
+                            candidate.getSubjectX500Principal().getName());
+                }
+            }
+        }
+        return false;
     }
 
     private static Collection<X509Certificate> parseBundle(java.io.InputStream in) throws Exception {
