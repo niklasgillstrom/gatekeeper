@@ -70,17 +70,45 @@ class ConfirmBindingTest {
      * confirmation below is a non-issuance notice, which carries no
      * certificate.
      */
+    private final EphemeralReceiptSigner signer = new EphemeralReceiptSigner(2048);
+
+    @Test
+    void theNonceMismatchRefusalIsSigned() throws Exception {
+        registerSwedishEntry("SE-9");
+        when(principalResolver.currentPrincipal()).thenReturn(VERIFIER_PRINCIPAL);
+        IssuanceConfirmation replayed = nonIssuanceNotice("SE-9");
+        replayed.setConfirmationNonce("not-the-bound-nonce");
+
+        IssuanceConfirmationResponse rejection = serviceWithMtls(true).confirmIssuance(replayed, "SE");
+
+        assertThat(rejection.getSigningCertificate()).isEqualTo(signer.getSigningCertificatePem());
+        java.security.cert.X509Certificate cert = (java.security.cert.X509Certificate)
+                java.security.cert.CertificateFactory.getInstance("X.509").generateCertificate(
+                        new java.io.ByteArrayInputStream(rejection.getSigningCertificate()
+                                .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        java.security.Signature sig = java.security.Signature.getInstance(signer.getSignatureAlgorithm());
+        sig.initVerify(cert.getPublicKey());
+        sig.update(eu.gillstrom.gatekeeper.signing.ConfirmationCanonicalizer.canonicalize(rejection));
+        assertThat(sig.verify(java.util.Base64.getDecoder().decode(rejection.getSignature()))).isTrue();
+    }
+
     private VerificationService serviceWithMtls(boolean mtlsEnabled) {
         VerificationService service = new VerificationService(
                 mock(SecurosysVerifier.class),
                 mock(YubicoVerifier.class),
                 mock(AzureHsmVerifier.class),
                 mock(GoogleCloudHsmVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.MarvellHsmVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.ThalesLunaVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.Crypto4AVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.FortanixVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.NShieldVerifier.class),
                 registry,
-                new EphemeralReceiptSigner(2048),
+                signer,
                 mock(IssuerCaValidator.class),
                 auditLog,
                 principalResolver,
+                KeyPolicy.defaults(),
                 mtlsEnabled);
         service.warnIfPrincipalBindingDisabled();
         return service;
@@ -218,8 +246,10 @@ class ConfirmBindingTest {
         IssuanceConfirmation replayed = nonIssuanceNotice("SE-8");
         replayed.setConfirmationNonce("not-the-bound-nonce");
 
-        assertThatThrownBy(() -> service.confirmIssuance(replayed, "SE"))
-                .isInstanceOf(ApprovalRegistry.NonceMismatchException.class);
+        IssuanceConfirmationResponse rejection = service.confirmIssuance(replayed, "SE");
+
+        assertThat(rejection.getRegistryStatus()).isEqualTo(RegistryStatus.ANOMALY_NONCE_MISMATCH);
+        assertThat(rejection.isLoopClosed()).isFalse();
 
         AuditEntry entry = auditLog.findByVerificationId("SE-8").orElseThrow();
         assertThat(entry.operation()).isEqualTo("CONFIRM");

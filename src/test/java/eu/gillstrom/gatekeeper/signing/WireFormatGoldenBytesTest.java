@@ -55,8 +55,8 @@ class WireFormatGoldenBytesTest {
      * an identical literal — keep them in lockstep.
      */
     private static final String EXPECTED_GOLDEN =
-            "v2|test-uuid|test-nonce|true|2026-04-27T00:00:00Z|aa:bb|RSA|YUBICO|YubiHSM 2|"
-            + "20783176|5569743098|Test|signing|SE|"
+            "v3|test-uuid|test-nonce|true|2026-04-27T00:00:00Z|aa:bb|RSA|YUBICO|YubiHSM 2|"
+            + "20783176|5569743098|1231015932|5566778899|9871234567|Test|signing|SE|"
             + "true|true|true|true|"
             + "true|true|true|true|true|true";
 
@@ -75,7 +75,10 @@ class WireFormatGoldenBytesTest {
                 .hsmVendor("YUBICO")
                 .hsmModel("YubiHSM 2")
                 .hsmSerialNumber("20783176")
-                .supplierIdentifier("5569743098")
+                .customerOrganisationNumber("5569743098")
+                .customerSwishNumber("1231015932")
+                .supplierIdentifier("5566778899")
+                .supplierNumber("9871234567")
                 .supplierName("Test")
                 .keyPurpose("signing")
                 .countryCode("SE")
@@ -173,20 +176,36 @@ class WireFormatGoldenBytesTest {
         // compliant=false, verificationTimestamp null -> empty.
         assertThat(s)
                 .as("null confirmationNonce and null verificationTimestamp both render as empty")
-                .startsWith("v2|v1-uuid||false||");
+                .startsWith("v3|v1-uuid||false||");
 
-        // After v2, verificationId, the empty nonce, compliant, and the empty
-        // timestamp field, 19 further fields (9 string fields + 4 keyProperty
-        // bits + 6 DORA article bits) are all empty. Total 24 canonical cells,
-        // 23 separators. We assert the full deterministic output rather than
+        // After v3, verificationId, the empty nonce, compliant, and the empty
+        // timestamp field, 22 further fields (12 string fields + 4 keyProperty
+        // bits + 6 DORA article bits) are all empty. Total 27 canonical cells,
+        // 26 separators. We assert the full deterministic output rather than
         // just a prefix so a future change that accidentally inserts a
         // non-empty default is caught.
-        String expectedAllNull = "v2|v1-uuid||false" + "|".repeat(20);
+        String expectedAllNull = "v3|v1-uuid||false" + "|".repeat(23);
         assertThat(s)
                 .as("entire canonical form when only verificationId and compliant are set "
                     + "must be the version marker, the verificationId, an empty nonce, the "
-                    + "boolean, an empty timestamp, and 19 further empty fields (23 "
+                    + "boolean, an empty timestamp, and 22 further empty fields (26 "
                     + "separators total)")
                 .isEqualTo(expectedAllNull);
+    }
+
+    /** The 1.4.0–1.5.0 literal, byte for byte, for the same receipt without the 1.6.0 fields. */
+    private static final String V2_GOLDEN =
+            "v2|test-uuid|test-nonce|true|2026-04-27T00:00:00Z|aa:bb|RSA|YUBICO|YubiHSM 2|"
+            + "20783176|5566778899|Test|signing|SE|"
+            + "true|true|true|true|"
+            + "true|true|true|true|true|true";
+
+    @Test
+    void thePreviousVersionIsTheFormReleasesBefore160Signed() {
+        assertThat(new String(ReceiptCanonicalizer.canonicalize(fixedReceipt(), ReceiptCanonicalizer.PREVIOUS_VERSION),
+                StandardCharsets.UTF_8)).isEqualTo(V2_GOLDEN);
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> ReceiptCanonicalizer.canonicalize(fixedReceipt(), "v4"))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

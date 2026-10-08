@@ -182,4 +182,21 @@ class GatekeeperControllerTest {
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         return Base64.getEncoder().encodeToString(md.digest(s.getBytes(StandardCharsets.UTF_8)));
     }
+
+    @Test
+    void healthReportsTheHeadOfTheChainOrNoneWhenEmpty() throws Exception {
+        JsonNode empty = json.readTree(mockMvc.perform(get("/v1/gatekeeper/health"))
+                .andReturn().getResponse().getContentAsString());
+        assertThat(empty.get("headSequenceNumber").asLong()).isZero();
+        assertThat(empty.get("headTimestamp").isNull()).isTrue();
+
+        auditLog.append(new AuditAppendRequest("CN=test", "VERIFY", "v-1",
+                base64Sha256("req"), base64Sha256("rcpt"), true));
+        auditLog.append(new AuditAppendRequest("CN=test", "VERIFY", "v-2",
+                base64Sha256("req"), base64Sha256("rcpt"), true));
+        JsonNode two = json.readTree(mockMvc.perform(get("/v1/gatekeeper/health"))
+                .andReturn().getResponse().getContentAsString());
+        assertThat(two.get("headSequenceNumber").asLong()).isEqualTo(2);
+        assertThat(two.get("headTimestamp").isNull()).isFalse();
+    }
 }

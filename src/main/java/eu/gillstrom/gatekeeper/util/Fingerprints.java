@@ -37,14 +37,7 @@ public final class Fingerprints {
     public static String ofSubjectPublicKeyInfo(byte[] subjectPublicKeyInfo) {
         try {
             byte[] hash = MessageDigest.getInstance("SHA-256").digest(subjectPublicKeyInfo);
-            StringBuilder sb = new StringBuilder(hash.length * 3);
-            for (int i = 0; i < hash.length; i++) {
-                if (i > 0) {
-                    sb.append(':');
-                }
-                sb.append(String.format("%02x", hash[i] & 0xff));
-            }
-            return sb.toString();
+            return java.util.HexFormat.ofDelimiter(":").formatHex(hash);
         } catch (Exception e) {
             // SHA-256 is mandatory in every JRE (JCA guarantee).
             throw new IllegalStateException("SHA-256 unavailable", e);

@@ -70,7 +70,7 @@ The thesis applies EU legal methodology — examining wording, context, and obje
 | **Article 9(3)(c)** | **Prevent** the lack of availability, the impairment of the authenticity and integrity, the breaches of confidentiality and the loss of data. | The verb is "prevent" — not "minimise," not "manage." An entity that chooses a manual process over an automated solution does not *prevent* the impairment of authenticity and integrity — it *permits* it by deliberately choosing a method with inherent weaknesses. |
 | **Article 9(3)(d)** | Ensure that data is protected from risks arising from data management, **including poor administration, processing-related risks and human error**. | An entity that identifies a risk, formulates a countermeasure (HSM requirement), but fails to verify compliance exhibits poor administration. Choosing a manual process over an automated one introduces all three listed risk categories simultaneously. |
 | **Article 9(4)(a)** | Develop and document an information security policy defining rules to protect the availability, authenticity, integrity and confidentiality of data, information assets and ICT assets, **including those of their customers, where applicable**. | The legislature explicitly anticipated situations where the bank's obligations extend to the customer's technical environment. This excludes the interpretation that the bank's obligations under Article 9 are limited to internal matters. |
-| **Article 9(4)(d)** | Implement **policies and protocols for strong authentication mechanisms**, based on relevant standards and **dedicated control systems**, and protection measures of cryptographic keys whereby data is encrypted in line with results of approved data classification and ICT risk assessment processes. | Digital signing is an authentication mechanism. The requirement that it be "strong" means it must actually provide authenticity, not merely give the appearance of it. The requirement for "dedicated control systems" means there must be mechanisms to verify that the authenticity guarantee is maintained. The explicit reference to "protection measures of cryptographic keys" directly addresses the HSM verification question. |
+| **Article 9(4)(d)** | Implement **policies and protocols for strong authentication mechanisms**, based on relevant standards and **dedicated control systems**, and protection measures of cryptographic keys whereby data is encrypted based on results of approved data classification and ICT risk assessment processes. | Digital signing is an authentication mechanism. The requirement that it be "strong" means it must actually provide authenticity, not merely give the appearance of it. The requirement for "dedicated control systems" means there must be mechanisms to verify that the authenticity guarantee is maintained. The explicit reference to "protection measures of cryptographic keys" directly addresses the HSM verification question. |
 
 #### 3.4 The Reversed Proportionality Argument
 
@@ -171,7 +171,7 @@ The proportionality argument is further reinforced: since the verification mecha
 
 A further obligation follows from the combination of Articles 5(2)(b), 9(3)(d) and 9(4)(a). Banks that impose a contractual HSM requirement on customers and know — through the verification procedure described in Section 4.1 — which technical suppliers have valid HSM attestation, are obligated under DORA to make that information available to their customers. To impose a requirement without informing the customer how it can be met constitutes poor administration within the meaning of Article 9(3)(d). The bank's obligation under Article 9(4)(a) to protect data "including those of their customers, where applicable" extends to ensuring that customers have the information necessary to comply with the security requirements the bank itself has imposed. In practice, this means banks must provide customers seeking Swish Utbetalning with a list of technical suppliers whose HSM attestation has been verified. This is not a commercial recommendation — it is a factual record of compliance status, comparable to publishing which auditing firms hold a valid licence from the supervisory authority.
 
-Should the initial list of verified technical suppliers contain only a single provider, this does not constitute ICT concentration risk within the meaning of Article 3(29). The reference implementation is published as open source, supporting multiple HSM vendors (Securosys and Yubico end to end; Azure and Google Cloud are accepted and checked but cannot yet end in COMPLIANT — see "Supported HSM Vendors"), with no vendor lock-in. The barrier to becoming a compliant technical supplier is low: acquire a certified HSM, implement attestation verification, and register a TL-number. A market with a single initial provider due to first-mover advantage — where the technology is open, the standards are published, and the entry barrier is minimal — is structurally different from the concentration risk DORA addresses, which concerns dependency on providers that are not easily substitutable. Any technical supplier with a certified HSM can replicate the capability.
+Should the initial list of verified technical suppliers contain only a single provider, this does not constitute ICT concentration risk within the meaning of Article 3(29). The reference implementation is published as open source, supporting multiple HSM vendors (Crypto4A, Entrust nShield, Fortanix, Securosys, Thales Luna and Yubico end to end; Azure, Google Cloud and Marvell are accepted and checked but cannot yet end in COMPLIANT — see "Supported HSM Vendors"), with no vendor lock-in. The barrier to becoming a compliant technical supplier is low: acquire a certified HSM, implement attestation verification, and register a TL-number. A market with a single initial provider due to first-mover advantage — where the technology is open, the standards are published, and the entry barrier is minimal — is structurally different from the concentration risk DORA addresses, which concerns dependency on providers that are not easily substitutable. Any technical supplier with a certified HSM can replicate the capability.
 
 A separate consideration arises from the fact that representatives of all six owning banks sit on GetSwish AB's board. Any coordination between banks regarding which technical suppliers to use, avoid, or favour would constitute a potentially anti-competitive agreement under Article 101 TFEU and applicable national competition law. The obligation to publish a factual list of verified technical suppliers resolves this: banks share compliance status, not commercial preferences. Each customer selects independently from the list of compliant providers.
 
@@ -325,7 +325,7 @@ In the description below, "the gatekeeper" denotes whichever authority is operat
 
 **Step 2.** GetSwish AB forwards the attestation evidence — together with the public key extracted from the CSR — to the gatekeeper API for independent verification. This occurs *before* any certificate is issued.
 
-**Step 3.** The gatekeeper verifies the attestation certificate chain against the HSM manufacturer's root CA pinned in the verifier (`java.security.cert.CertPathValidator` with `PKIXParameters` anchored at the manufacturer's root). The verification confirms that the signing key was generated inside a genuine HSM and is non-exportable. The result is binary: COMPLIANT or NON-COMPLIANT. The compliance predicate in the code is `publicKeyMatch && attestationChainValid && attestationSignatureValid && generatedOnDevice && !exportable && errors.isEmpty()` (see `VerificationService.verify()`), and every DORA article bit in the receipt likewise requires a valid attestation signature.
+**Step 3.** The gatekeeper verifies the attestation certificate chain against the HSM manufacturer's root CA pinned in the verifier (PKIX `CertPathValidator` anchored at the manufacturer's root for Securosys, Yubico and Fortanix; explicit signature checks up to the pinned root for the other vendors). The verification confirms that the signing key was generated inside a genuine HSM and is non-exportable. The result is binary: COMPLIANT or NON-COMPLIANT. The compliance predicate in the code is `publicKeyMatch && attestationChainValid && attestationSignatureValid && generatedOnDevice && !exportable && errors.isEmpty()` (see `VerificationService.verify()`), and every DORA article bit in the receipt likewise requires a valid attestation signature. The key itself must also be allowed by the key policy (`gatekeeper.key-policy.allowed-keys`, default `RSA-4096`, the Swish signing key); any other key adds `KEY_NOT_ALLOWED` to the errors and is NON-COMPLIANT however its attestation verifies.
 
 **Step 4.** The gatekeeper registers every verification result — both compliant and non-compliant — in its approval registry (`ApprovalRegistry.register(...)`). This registry serves as the authoritative record of all attestation verifications and enables the secondary reconciliation control described below.
 
@@ -400,7 +400,10 @@ Accepts attestation evidence and returns an independent verification result with
     "-----BEGIN CERTIFICATE-----\n...",
     "-----BEGIN CERTIFICATE-----\n..."
   ],
+  "customerOrganisationNumber": "5569743098",
+  "customerSwishNumber": "1231015932",
   "supplierIdentifier": "5569741234",
+  "supplierNumber": "9871234567",
   "supplierName": "Example Teknisk Leverantör AB",
   "keyPurpose": "Swish payment signing"
 }
@@ -436,7 +439,10 @@ Accepts attestation evidence and returns an independent verification result with
     "article28_1a": true,
     "summary": "Signing key is cryptographically proven to be generated and stored in a certified HSM with non-exportable attribute. All DORA requirements for cryptographic key management are independently verifiable."
   },
+  "customerOrganisationNumber": "5569743098",
+  "customerSwishNumber": "1231015932",
   "supplierIdentifier": "5569741234",
+  "supplierNumber": "9871234567",
   "supplierName": "Example Teknisk Leverantör AB",
   "keyPurpose": "Swish payment signing",
   "countryCode": "SE",
@@ -445,7 +451,11 @@ Accepts attestation evidence and returns an independent verification result with
 }
 ```
 
-The `signature` is a detached Base64-encoded RSA/ECDSA signature computed over the canonical byte representation of the decision-relevant fields (see `ReceiptCanonicalizer` — `v2|verificationId|confirmationNonce|compliant|timestamp|fingerprint|algorithm|hsmVendor|hsmModel|hsmSerialNumber|supplierIdentifier|supplierName|keyPurpose|countryCode|keyProperties...|doraCompliance...`). The version marker moved from `v1` to `v2` in release 1.4.0 when `confirmationNonce` was brought inside the signed form; a financial entity still computing `v1` bytes will fail to verify every receipt, so the `hsm` repository must be upgraded in lock-step (see `CHANGELOG.md`). The `signingCertificate` PEM lets any party independently verify the signature without a prior key-exchange step. Under the NCA profile (`gatekeeper.signing.mode=configured`) the signing certificate is the NCA's organisation certificate — the certificate the NCA uses for ordinary administrative signing of supervisory acts. The reference `EphemeralReceiptSigner` produces a throwaway `CN=REFERENCE-EPHEMERAL` certificate marked as such.
+The `signature` is a detached Base64-encoded RSA/ECDSA signature computed over the canonical byte representation of the decision-relevant fields (see `ReceiptCanonicalizer` — `v3|verificationId|confirmationNonce|compliant|timestamp|fingerprint|algorithm|hsmVendor|hsmModel|hsmSerialNumber|customerOrganisationNumber|customerSwishNumber|supplierIdentifier|supplierNumber|supplierName|keyPurpose|countryCode|keyProperties...|doraCompliance...`). The version marker moved to `v3` in 1.6.0, when the customer's organisation and Swish numbers and the supplier number were brought inside the signed form; a receipt signed under `v2` (1.4.0–1.5.0) is re-verified with `ReceiptCanonicalizer.canonicalize(receipt, "v2")`. It moved from `v1` to `v2` in release 1.4.0 when `confirmationNonce` was brought inside the signed form; a financial entity still computing `v1` bytes will fail to verify every receipt, so the `hsm` repository must be upgraded in lock-step (see `CHANGELOG.md`). The `signingCertificate` PEM lets any party independently verify the signature without a prior key-exchange step. Under the NCA profile (`gatekeeper.signing.mode=configured`) the signing certificate is the NCA's organisation certificate — the certificate the NCA uses for ordinary administrative signing of supervisory acts. The reference `EphemeralReceiptSigner` produces a throwaway `CN=REFERENCE-EPHEMERAL` certificate marked as such.
+
+**Parties** *(since 1.6.0)*. `customerOrganisationNumber` and `customerSwishNumber` name the customer the certificate is for. When a technical supplier holds the key, `supplierIdentifier` is its organisation number and `supplierNumber` its 987 number, as its transport certificate carries them; a customer without a technical supplier has no supplier fields. The registry stores all of them and the receipt signs them, so the supervisor can compare who holds each verified key with the banks' customer registers (`SUPERVISORY_OPERATIONS.md` §3.5). They are personal data when the customer is a sole trader, whose organisation number is the personal identity number; the processing is part of the supervisory task.
+
+**Evidence kept** *(since 1.6.0)*. The registry entry keeps the verification request as submitted (`submission`): public key, attestation data, signature and chain, parties. Until 1.5.0 only a digest of it was kept, in the audit log, so the supervisor depended on the financial entity for the evidence and could not repeat a verification, for instance with a corrected verifier. `VerificationService.requestDigestBase64(submission)` equals the entry's `requestDigestBase64` in the audit log, which shows that what is kept is what was verified. The evidence is not secret; an attestation is a few kilobytes (4–7 kB for the samples in hsm).
 
 **Non-compliant response:**
 
@@ -475,14 +485,17 @@ The `signature` is a detached Base64-encoded RSA/ECDSA signature computed over t
     "article9_3d": false,
     "article9_4d": false,
     "article28_1a": false,
-    "summary": "No valid HSM attestation provided. Cannot verify that signing key is hardware-protected. The absence of attestation means the financial entity cannot demonstrate compliance with DORA Articles 5(2)(b), 6(10), 9(3)(c)-(d), 9(4)(d), or 28(1)(a). The entity must provide cryptographic attestation evidence or be considered non-compliant."
+    "summary": "Non-compliant: attestation chain invalid, attestation signature invalid, public key does not match attestation, key not generated on device, key is exportable. The absence of valid attestation means the financial entity cannot demonstrate compliance with DORA Articles 5(2)(b), 6(10), 9(3)(c)-(d), 9(4)(d), or 28(1)(a). The entity must provide cryptographic attestation evidence or be considered non-compliant."
   },
+  "customerOrganisationNumber": "5569743098",
+  "customerSwishNumber": "1231015932",
   "supplierIdentifier": "5569741234",
+  "supplierNumber": "9871234567",
   "supplierName": "Example Teknisk Leverantör AB",
   "keyPurpose": "Swish payment signing",
   "countryCode": "SE",
   "errors": [
-    "Attestation certificate chain verification failed against manufacturer root CA"
+    "Certificate chain verification failed"
   ],
   "warnings": []
 }
@@ -496,7 +509,7 @@ Batch verification for multiple entities. Returns individual results plus aggreg
 
 #### POST /v1/attestation/{countryCode}/confirm
 
-Step 7 of the verification flow. GetSwish AB (or the issuing bank) posts the outcome of the certificate-issuance decision back to the gatekeeper. The gatekeeper builds and validates a PKIX path from the submitted certificate to the configured issuer-CA trust bundle (`IssuerCaValidator` + `issuer-ca-bundle.pem`; any further certificates in `signingCertificatePem` are used as intermediates), extracts the public key, and verifies that its fingerprint matches the attestation evidence approved in Step 3. On a match (`VERIFIED_AND_ISSUED`) the certificate is stored on the registry entry for the settlement-time lookup. Anomalies (public-key mismatch, certificate issued despite NON-COMPLIANT status, issuance reported without a certificate, confirmation for unknown verification ID, or certificate not chaining to a trusted issuer CA) are flagged and persisted in the approval registry.
+Step 7 of the verification flow. GetSwish AB (or the issuing bank) posts the outcome of the certificate-issuance decision back to the gatekeeper. The gatekeeper builds and validates a PKIX path from the submitted certificate to the configured issuer-CA trust bundle (`IssuerCaValidator` + `issuer-ca-bundle.pem`; any further certificates in `signingCertificatePem` are used as intermediates), extracts the public key, and verifies that its fingerprint matches the attestation evidence approved in Step 3. On a match (`VERIFIED_AND_ISSUED`) the certificate is stored on the registry entry for the settlement-time lookup. Anomalies (public-key mismatch, certificate issued despite NON-COMPLIANT status, issuance reported without a certificate, confirmation for unknown verification ID, or certificate not chaining to a trusted issuer CA) are flagged. Those that concern an existing entry are persisted in the approval registry; a confirmation for an unknown verification ID has no entry to record it in and is recorded in the audit log only, so `/registry/anomalies` does not list it.
 
 **Request — certificate was issued:**
 
@@ -538,9 +551,13 @@ Step 7 of the verification flow. GetSwish AB (or the issuing bank) posts the out
   "actualPublicKeyFingerprint": "c2:e7:bc:ce:c8:ae:e1:ed:...",
   "registryStatus": "VERIFIED_AND_ISSUED",
   "processedTimestamp": "2026-03-20T14:32:16.481Z",
-  "anomalies": []
+  "anomalies": [],
+  "signature": "MEUCIQ...",
+  "signingCertificate": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"
 }
 ```
+
+Every confirmation response carries `signature` and `signingCertificate` *(since 1.6.0)*: a signature with the receipt key over the canonical form defined in `ConfirmationCanonicalizer` (`c1|verificationId|loopClosed|publicKeyMatch|expectedPublicKeyFingerprint|actualPublicKeyFingerprint|registryStatus|processedTimestamp|anomalies`). Before 1.6.0 the response was unsigned, so its integrity rested on TLS alone; the financial entity now verifies it against `swish.gatekeeper.trusted-keys` exactly as it verifies the receipt. The two fields are omitted from the remaining examples.
 
 **Response — non-issuance notice accepted:**
 
@@ -610,7 +627,7 @@ Without `signingCertificatePem` the gatekeeper looks the certificate up among th
 }
 ```
 
-A supplied `signingCertificatePem` is used directly and `certSerial`/`issuerDn` are then not consulted. In both forms compliance is read from the registry by the fingerprint of the certificate's public key.
+A supplied `signingCertificatePem` must be byte-identical to the certificate stored at Step 7 for its own serial and issuer; `certSerial`/`issuerDn` in the request are then not consulted. In both forms the registry entry is the one whose confirmation stored that certificate. *(Changed 1.6.0: until then a supplied PEM was not compared with anything and compliance was read by the fingerprint of the certificate's public key.)*
 
 `algorithm` is optional and defaults to `SHA512withRSA` (RSA-PKCS#1 v1.5 with SHA-512), the algorithm used by the reference Swish utbetalning signing flow. The other accepted values are `SHA384withRSA`, `SHA256withRSA`, `SHA256withECDSA`, `SHA384withECDSA`, `SHA512withECDSA` and `RSASSA-PSS`; anything else is `ALGORITHM_NOT_SUPPORTED`. `RSASSA-PSS` is verified with one fixed parameter set — SHA-512, MGF1 with SHA-512, a 64-byte salt, trailer field 1 — and a PSS signature made with other parameters does not verify. Before 1.5.0 `RSASSA-PSS` was accepted by the whitelist but never verified, because the parameters were not set and the JCA provider refused to verify without them.
 
@@ -626,11 +643,11 @@ A supplied `signingCertificatePem` is used directly and `certSerial`/`issuerDn` 
 }
 ```
 
-**Response — cryptographically valid signature against a certificate with no registry entry (default-deny):**
+**Response — a certificate with no registry entry (default-deny; the signature is not checked, so `signatureValid` is false):**
 
 ```json
 {
-  "signatureValid": true,
+  "signatureValid": false,
   "compliant": false,
   "auditEntryId": null,
   "reason": "CERT_NOT_FOUND",
@@ -650,19 +667,28 @@ A supplied `signingCertificatePem` is used directly and `certSerial`/`issuerDn` 
 }
 ```
 
-`reason` is one of: `OK`, `CERT_NOT_FOUND`, `SIGNATURE_INVALID`, `CERT_NON_COMPLIANT`, `MALFORMED_INPUT`, `ALGORITHM_NOT_SUPPORTED`. `auditEntryId` is the approval-registry `verificationId` the compliance verdict was read from: it is shared by every settlement against the same certificate and by the `VERIFY` and `CONFIRM` audit entries of that issuance, and it is `null` when no registry entry matched. `auditEntryHashHex`, added in 1.5.0, is the `thisEntryHashHex` of the `SETTLEMENT_VERIFY` audit entry written for this call, so it identifies that one decision in the chain; it is present on every `200` response, `CERT_NOT_FOUND` included. It is not covered by the entry's `receiptDigestBase64`, which is computed over the other four fields before the entry exists. The settlement-rail enforcement layer (railgate) allows the settlement if and only if both `signatureValid` and `compliant` are `true`. Any other combination triggers default-deny: the originating bank receives a structured error code and the transaction does not settle until the bank resubmits with valid data, or the settlement is abandoned.
+`reason` is one of: `OK`, `CERT_NOT_FOUND`, `SIGNATURE_INVALID`, `CERT_NON_COMPLIANT`, `CERT_EXPIRED`, `MALFORMED_INPUT`, `ALGORITHM_NOT_SUPPORTED`. From 1.6.0 the certificate is resolved before the signature is checked, so `CERT_NOT_FOUND` comes with `signatureValid=false`; `CERT_EXPIRED` means the stored certificate is outside its validity period at the time of the call. Only an entry whose confirmation ended in `VERIFIED_AND_ISSUED` settles; until 1.6.0 an entry still awaiting Step 7, or confirmed as `VERIFIED_NOT_ISSUED`, also settled. `auditEntryId` is the approval-registry `verificationId` the compliance verdict was read from: it is shared by every settlement against the same certificate and by the `VERIFY` and `CONFIRM` audit entries of that issuance, and it is `null` when no registry entry matched. `auditEntryHashHex`, added in 1.5.0, is the `thisEntryHashHex` of the `SETTLEMENT_VERIFY` audit entry written for this call, so it identifies that one decision in the chain; it is present on every `200` response, `CERT_NOT_FOUND` included. It is not covered by the entry's `receiptDigestBase64`, which is computed over the other four fields before the entry exists. The settlement-rail enforcement layer (railgate) allows the settlement if and only if both `signatureValid` and `compliant` are `true`. Any other combination triggers default-deny: the originating bank receives a structured error code and the transaction does not settle until the bank resubmits with valid data, or the settlement is abandoned.
 
 The role-based access policy in `SecurityConfig` restricts this endpoint to clients holding the `SETTLEMENT_RAIL` role (typically the central-bank settlement system) or `SUPERVISOR` (for sandbox and incident-response scenarios).
 
 ### Supported HSM Vendors
 
+**Inclusion criterion.** A vendor is supported when a third party can verify offline, against a published vendor root and without a human witness or the involvement of the vendor or the financial entity, that an individual key was generated in the HSM and cannot be exported from it. The criterion follows from DORA (Regulation (EU) 2022/2554) Article 9(3)(d), under which ICT solutions and processes shall "ensure that data is protected from risks arising from data management, including poor administration, processing-related risks and human error" (Swedish text: "säkerställa att uppgifterna skyddas mot risker som uppstår från datahanteringen, inbegripet bristfällig förvaltning, processrelaterade risker och den mänskliga faktorn"), and from Article 9(4)(d), under which financial entities shall "implement policies and protocols for strong authentication mechanisms, based on relevant standards and dedicated control systems, and protection measures of cryptographic keys whereby data is encrypted based on results of approved data classification and ICT risk assessment processes". The same question is put to every vendor: can the requirement be shown to be met with the vendor's attestation? A vendor marked ❌ is one for which it cannot be shown; that is not a finding that the vendor, or an entity using it, fails DORA.
+
 | Vendor | Attestation Method | Root CA Verification |
 |---|---|---|
-| Securosys Primus | XML attestation + signature + cert chain | Securosys root CA |
-| Yubico YubiHSM 2 | Attestation certificate chain | Yubico root CA |
-| Azure Managed HSM | `az keyvault key get-attestation` JSON | ⚠️ Never COMPLIANT: `AZURE_ATTRIBUTES_UNVERIFIED` is always added, because no parser for the Marvell attribute encoding ships and exportability and key origin cannot be established. Marvell manufacturer chain only (Microsoft MAA owner-chain not yet implemented; trust anchor expired 2025-11-16) |
-| Google Cloud HSM | Attestation bundle + cert chain | ⚠️ Never COMPLIANT since 1.5.0: `GOOGLE_KEY_ORIGIN_UNVERIFIED` is always added, because no key-origin attribute is parsed and a non-extractable key may have been imported (before 1.5.0 non-extractability was reported as origin `generated`). Marvell manufacturer chain only (Google Hawksbill owner-chain not yet implemented; trust anchor expired 2025-11-16) |
-| AWS CloudHSM | ❌ Lacks per-key attestation | Not supported |
+| Crypto4A QASM | QASM attestation message (signed claims) | ✅ Every signature block (ECDSA P-384, HSS) over the claims, chained to the pinned C4A_RCA key; `key-spki` must be the CSR key, with private-key class, confined, hardware-generated and never-extracted claims. The PKI Consortium's published message reaches COMPLIANT (`AttestationSignatureValidityTest.genuineCrypto4AMessageSetsEveryArticleBit`) |
+| Entrust nShield | Key attestation bundle JSON (`nfkmattest`) | ✅ Warrant from the pinned KWARN-1 key to the module's KLF2 and ESN; module state, world binding and key generation certificates; the CSR key's generation-time ACL must not make it recoverable by the Administrator Card Set nor allow export or key-wrapping permissions. Only `ModuleInformation` warrants are accepted; `FieldUpgradeModuleInformation` depends on legacy DSA-1024 signatures (Entrust). Entrust's two examples carry such warrants and are NON-COMPLIANT with no article bit (`AttestationSignatureValidityTest.entrustsFieldUpgradeBundlesSetNoArticleBit`); below the warrant they verify as Entrust reports (`NShieldVerifierTest`) |
+| Fortanix DSM | Key attestation JSON (`key_attestation_<key UUID>.json`) | ✅ Authority by PKIX with Fortanix's attestation policy under the pinned Fortanix root at signing time; statement attests the CSR key with generated-in-DSM and never-exportable claims. Fortanix's documented sample reaches COMPLIANT (`AttestationSignatureValidityTest.genuineFortanixStatementSetsEveryArticleBit`) |
+| Securosys Primus | XML attestation + signature + cert chain | ✅ Chain under the pinned Securosys root; XML signature by the attestation key; key attributes (generated, never extractable) and the CSR key read from the signed XML. The reference Primus HSM's attestation of an RSA-4096 key reaches COMPLIANT under the default key policy (`AttestationSignatureValidityTest.genuineSecurosysAttestationSetsEveryArticleBit`) |
+| Thales Luna | Public Key Confirmation (`cmu getpkc`, PKCS#7) | ✅ PKC chain under the pinned Chrysalis-ITS Root key; Proof of Origin key must be the CSR key. Thales's own test vector reaches COMPLIANT (`AttestationSignatureValidityTest.genuineThalesLunaPkcSetsEveryArticleBit`) |
+| Yubico YubiHSM 2 | Attestation certificate chain | ✅ Chain under the pinned Yubico root; origin (generated) and capabilities (not exportable under wrap) read from the attestation certificate, whose key must be the CSR key. The reference YubiHSM 2's attestation of an RSA-4096 key reaches COMPLIANT under the default key policy (`AttestationSignatureValidityTest.genuineYubiHsm2AttestationSetsEveryArticleBit`) |
+| Azure Managed HSM | `az keyvault key get-attestation` JSON | ⚠️ Marvell chain under the pinned Marvell roots, both attestations signed by the partition certificate, key attributes and RSA modulus read from the signed blobs (`MarvellAttestation`); never COMPLIANT until a real attestation confirms the Marvell format (`MARVELL_FORMAT_UNCONFIRMED`) |
+| Google Cloud HSM | `attestation.dat` (gzip or decompressed) + cert chain | ⚠️ Marvell chain and Google owner chain (Hawksbill Root v1 prod), both pinned; key attributes and RSA modulus read from the signed blob; never COMPLIANT until a real attestation confirms the Marvell format (`MARVELL_FORMAT_UNCONFIRMED`) |
+| Marvell LiquidSecurity | `attest.dat` (from key generation) + partition and card certificates | ⚠️ Marvell chain under the pinned Marvell roots; key attributes and RSA modulus or EKCV read from the signed blob; never COMPLIANT until a real attestation confirms the Marvell format (`MARVELL_FORMAT_UNCONFIRMED`) |
+| AWS CloudHSM | No per-key attestation | ❌ Excluded: the requirement in Article 9(3)(d) cannot be shown to be met for an individual key. AWS CloudHSM attests the identity of the HSM and the cluster, and only until the cluster is initialised (AWS CloudHSM User Guide, page `verify-hsm-identity`). That attestation does not cover individual keys, so it cannot be independently verified that a key was generated in the HSM and cannot be exported. |
+
+The published Thales, Crypto4A and Fortanix samples attest RSA-2048 and EC P-256 keys; under the default key policy they are NON-COMPLIANT with `KEY_NOT_ALLOWED` only (`defaultPolicyRefusesEveryKeyButRsa4096`), and the tests above run them under a policy that also allows those keys.
 
 ---
 
@@ -711,7 +737,7 @@ A deployer who wants archival retention beyond the live-file lifetime configures
 
 ### Gatekeeper public endpoints
 
-`GET /v1/gatekeeper/keys` and `GET /v1/gatekeeper/anchor` are published unauthenticated so that any relying party can verify gatekeeper-signed evidence retroactively without holding a client certificate. `GET /v1/gatekeeper/health` is not: it reports operational state rather than evidence, and requires the `SUPERVISOR` role (see `SecurityConfig`). All three are rate limited under the registry bucket.
+`GET /v1/gatekeeper/keys` and `GET /v1/gatekeeper/anchor` need no role, so that any relying party can verify gatekeeper-signed evidence retroactively. Under the `nca` profile the listener requires a client certificate from a trusted CA for every connection (`server.ssl.client-auth: need`), so "public" means that no role is required, not that no certificate is: a relying party without a certificate the trust store accepts cannot complete the TLS handshake. A deployment that must serve these endpoints to holders of no client certificate needs a separate listener or proxy with `client-auth: want` or none. `GET /v1/gatekeeper/health` is not: it reports operational state rather than evidence, and requires the `SUPERVISOR` role (see `SecurityConfig`). All three are rate limited under the registry bucket.
 
 - **`GET /v1/gatekeeper/keys`** — returns the active and retired signing certificates with SHA-256 fingerprints. Operators paste this list into the financial entity's `swish.gatekeeper.trusted-keys` configuration (or a supervisory tool's equivalent trust store) so receipts signed under any historically active key remain verifiable for the DORA Regulation (EU) 2022/2554 Article 28(6) retention window. Backed by `GatekeeperKeyDirectory`.
 - **`GET /v1/gatekeeper/anchor`** — returns the current chain-head, signed. The body carries `headSequenceNumber`, `headHashHex`, `headTimestamp`, `headSignatureBase64`, `signingKeyFingerprintHex` and `totalEntries`. The signature is computed over the canonical bytes of the head entry (`AuditEntry.canonicalBytesForSignature`). A supervisor or relying party publishes this anchor periodically to a public commitment — for instance, posting the daily anchor JSON on Finansinspektionen's web site, or anchoring the head hash in a transparency log. The published anchor commits the gatekeeper to the audit content as of that timestamp, making subsequent retroactive rewriting detectable.
@@ -723,7 +749,7 @@ These endpoints require authentication *and* the `SUPERVISOR` role. With `gateke
 
 - **`GET /v1/audit/witness/{verificationId}`** — single-event lookup. Returns `404` if the verification ID is unknown; otherwise the earliest `AuditEntry` with that ID, which for an issuance is the `VERIFY` or `BATCH_VERIFY` entry. The `CONFIRM` entries (one per confirmation attempt) and `SETTLEMENT_VERIFY` entries carrying the same ID are not returned here; list them with `range` or `export`. Used by an inspector who has been presented with a receipt by a financial entity and wants to verify the decision against the gatekeeper's own record.
 - **`GET /v1/audit/range?from=ISO&to=ISO`** — entries in a half-open `[from, to)` time window. The maximum window is 90 days (`AuditController.MAX_RANGE`) to bound the cost of a malicious or careless query. Returns entries in ascending sequence-number order.
-- **`GET /v1/audit/entity/{principal}`** — entries for a given mTLS principal, URL-encoded and compared exactly with the recorded value. That value is what `gatekeeper.security.mtls.principal-regex` captures from the client certificate's subject DN — by default the CN value, so a client `CN=swishTL,O=GetSwish` is queried as `swishTL`, not as the DN — and is the full DN only when the regex does not match. Used to inspect a specific supervisee's full history, for example when investigating a systemic problem with a particular technical supplier.
+- **`GET /v1/audit/entity/{principal}`** — entries for a given mTLS principal, URL-encoded and compared exactly with the recorded value. That value is the exact value of the subject attribute named by `gatekeeper.security.mtls.principal-attribute` — by default CN, so a client `CN=swishTL,O=GetSwish` is queried as `swishTL`, not as the DN. A certificate whose subject lacks the attribute, or carries it more than once, is not authenticated. *(Changed 1.6.0: the earlier `principal-regex` stopped at an escaped comma and fell back to the full DN when it did not match.)* Used to inspect a specific supervisee's full history, for example when investigating a systemic problem with a particular technical supplier.
 - **`GET /v1/audit/export?from=ISO&to=ISO&inspectionId=...`** — a packaged `AuditExport` bundle covering the requested window, sealed under the gatekeeper's active signing key. The body includes the chain-head hash at the moment of export and the active key's fingerprint, so a supervisor can simultaneously verify the export integrity and reconcile against the chain head visible from `GET /v1/gatekeeper/anchor` at the same moment. If `inspectionId` is omitted the gatekeeper generates a UUID; for a formal supervisory inspection the supervisor passes its own case identifier (for example `FI-2026-001`) so the dump is bound to the inspection record.
 
 For step-by-step procedures see `SUPERVISORY_OPERATIONS.md` (NCA operations runbook) and `FORENSIC_INSPECTION.md` (forensic evidence-extraction procedures).
@@ -749,12 +775,12 @@ mvn dependency:resolve
 mvn clean package
 
 # Reference / developer profile — permissive mTLS, ephemeral receipt signer
-java -jar target/gatekeeper-1.5.0.jar --spring.profiles.active=eba
+java -jar target/gatekeeper-1.6.0.jar --spring.profiles.active=eba
 
 # Production-shaped NCA profile — mTLS enforced, configured receipt signer
 # (see src/main/resources/application-nca.yaml for required environment
-# variables: keystore paths, passwords, signatory-rights mode)
-java -jar target/gatekeeper-1.5.0.jar --spring.profiles.active=nca
+# variables: keystore paths and passwords)
+java -jar target/gatekeeper-1.6.0.jar --spring.profiles.active=nca
 ```
 
 **End-to-end test of all three repositories.** `e2e/` is a separate Maven project that starts the built gatekeeper, hsm and railgate jars locally and drives Steps 2–7 and the settlement path between them; `mvn verify` here does not run it. See `e2e/README.md`.

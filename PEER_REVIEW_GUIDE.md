@@ -51,13 +51,11 @@ Reviewers approaching v1.2.0 should focus on the following additions relative to
 - A production-deployed NCA signing service. The `ConfiguredReceiptSigner` path loads a PKCS#12 keystore but the reference does not ship with the NCA's actual organisation certificate.
 - A full implementation of the forward-secure event stream that Article 2 §6.3 specifies. The hash-chained append-only audit log (`AppendOnlyFileAuditLog`) plus per-entry signing is implemented; what remains as GAP is COSE encoding of entries, RFC 3161 timestamping per batch, and forward-secure key rotation per Ma–Tsudik (2008).
 
-**What is pinned.** Each verifier embeds a single trust anchor as a Java text-block constant in the verifier source and parses it in the constructor. Constructor failure throws `IllegalStateException` and Spring Boot refuses to start. Additionally, `IssuerCaValidator` loads a configurable issuer-CA bundle (for Step-7 confirmation binding) from `gatekeeper.confirmation.issuer-ca-bundle-path` or the bundled `issuer-ca-bundle.pem` resource. **All four verifiers pin real vendor-issued roots: Securosys pins Securosys's CA; Yubico pins the YubiHSM Root CA fetched from `developers.yubico.com`; Azure and Google Cloud HSM both pin Marvell/Cavium's LiquidSecurity Root CA fetched from Marvell's official distribution at `marvell.com/.../liquid_security_certificate.zip` (the same anchor referenced by Google Cloud HSM's open-source verification code).**
+**What is pinned.** Each verifier embeds its trust anchors as Java text-block constants in the verifier source and parses it in the constructor. Constructor failure throws `IllegalStateException` and Spring Boot refuses to start. Additionally, `IssuerCaValidator` loads a configurable issuer-CA bundle (for Step-7 confirmation binding) from `gatekeeper.confirmation.issuer-ca-bundle-path` or the bundled `issuer-ca-bundle.pem` resource. **All nine verifiers pin real vendor-issued roots**, some more than one: Securosys pins Securosys's CA; Yubico pins the YubiHSM Root CA from `developers.yubico.com`; Azure, Google Cloud HSM and Marvell pin Marvell/Cavium's LiquidSecurity roots (two, `MarvellAttestation`), and Google additionally its owner root (Hawksbill Root v1 prod); Thales, Crypto4A, Fortanix and Entrust pin their vendors' roots as listed in `README.md`.
 
-**What is placeholder.** Receipt signing defaults to `EphemeralReceiptSigner` (RSA-3072 self-signed, fresh on every boot). The registry is in-memory. The supervisory-role authorisation policy beyond mTLS is marked `TODO-NCA`. Rate limiting is bucket-based but uses a default in-memory configuration.
+**What is placeholder.** Receipt signing defaults to `EphemeralReceiptSigner` (RSA-3072 self-signed, fresh on every boot). The registry is in-memory. Role authorisation is implemented in `SecurityConfig` (SUPERVISOR, FE, SETTLEMENT_RAIL, mapped from the client-certificate principal); a cross-country policy beyond the per-request jurisdiction binding is not. Rate limiting is bucket-based but uses a default in-memory configuration.
 
-**Rotation note for cloud-HSM trust anchor.** The Marvell LiquidSecurity Root CA bundled in `AzureHsmVerifier` and `GoogleCloudHsmVerifier` (SHA-256 `97:57:57:F0:D7:66:40:E0:3D:14:76:0F:8F:C9:E3:A5:58:26:FA:78:07:B2:C3:92:F7:80:1A:95:BD:69:CC:28`) expired on 2025-11-16. Marvell has presumably published a successor at the same URL; deployers should fetch the current certificate, verify its fingerprint against Marvell's documentation, and replace the constant before relying on chain validation for attestations created after the expiry date. PKIX does not check the trust anchor's own validity period, so the structural rejection-path tests still pass with the expired anchor.
-
-**Dual-chain verification model not implemented.** Google Cloud HSM's published Python sample (`verify_chains.py`, copyright 2021, last modified ~2023) verifies attestations against **two parallel chains**: the Marvell manufacturer chain (the anchor we bundle) and Google's own "Hawksbill Root v1 prod" CA owner chain (the anchor we do not bundle). Azure Managed HSM is expected to follow an analogous pattern with a Microsoft-controlled owner root. This verifier implements only the manufacturer chain — the owner-chain layer is out of scope for the academic case study, which uses Securosys Primus rather than Google Cloud HSM or Azure Managed HSM in production. Deployers planning to use the Azure or Google paths in production must add owner-chain validation per current cloud-vendor documentation; the verification protocol may have evolved since the 2021 Google sample, so consult the latest documentation rather than treating this code as the production model. The SECURITY NOTE in each verifier flags this explicitly.
+**Cloud-HSM attestation format unconfirmed.** `AzureHsmVerifier` and `GoogleCloudHsmVerifier` share `MarvellAttestation` with hsm. It follows Marvell's "LiquidSecurity HSM - Software Key Attestation" page and MIT-licensed `verify_pubkey.py` (response layout with a public- and a private-key object per key pair, `OBJ_ATTR_MODULUS` `0x0120`, KCV `0x0173`, EKCV `0x1003`), Microsoft's MIT-licensed parser and validator (byte offsets, signatures, Marvell roots) and Google's owner chain under the pinned "Hawksbill Root v1 prod". Microsoft's partition chain starts from a self-signed certificate taken from the submitted bundle, so it is not used. Neither cloud vendor's tool binds the attestation to a public key; here the private key must match the CSR key through its modulus or EKCV, directly or through the public key in the same signed blob. No real Azure or Google attestation has been run through it, so both verifiers add `MARVELL_FORMAT_UNCONFIRMED` and never report a valid attestation until one is committed as a fixture.
 
 ---
 
@@ -108,6 +106,17 @@ The table above is the count at v1.0.0 submission. Three test classes were added
 
 **Where the test PKI is built.** `src/test/java/eu/gillstrom/gatekeeper/testsupport/TestPki.java` — a direct sibling of `hsm`'s test PKI helper. Same idea: build a throwaway root + intermediate + leaf, assert the production verifier rejects it because it does not anchor at the pinned vendor root.
 
+### Mutation testing
+
+`mvn -Ppit test-compile org.pitest:pitest-maven:mutationCoverage` runs PIT 1.30.0 with the JUnit 5 plugin over every production class (reports in `target/pit-reports/`; `-Dpit.threads=N` sets the number of worker threads, default 4). In 1.6.0 every one of the 2,203 mutants is detected: 2,194 killed by a failing assertion and 9 timed out, which PIT counts as detected because the mutant made a test run past its time limit. The profile fails below 100 % (`mutationThreshold`). The first run detected 1,682 of 2,278 (284 survived, 312 not covered).
+
+Two configuration choices a reviewer should know about:
+
+- `avoidCallsTo` lists `java.io.FileDescriptor` beside PIT's default logging packages. Removing the `getFD().sync()` after an audit or journal write cannot be observed by a test, only by a power cut, so PIT does not mutate those calls.
+- `NcaProfileAuthorisationTest` starts the application inside the test method with `SpringApplicationBuilder`, not through the Spring test extension. Beans the extension builds outside a test method are not attributed to any test by PIT, so the null-chain mutants of the security configuration survived although the tests fail on them.
+
+Mutants that no input could tell apart from the original were not suppressed; the redundant constructs behind them were removed, each with its proof in the commit message: the two verifier rewrites (the device serial in `YubicoVerifier` read by a regular expression; the RSA signature representative in `MarvellAttestation` checked with `s.mod(n)`, RFC 8017 §5.2.2), `DocumentBuilderFactory.newDefaultInstance()` in `SecurosysVerifier` with five XML switches that `disallow-doctype-decl` leaves nothing to act on, bounds checks in `MarvellAttestation` that `ByteBuffer` performs anyway, an unreachable loop exit in `NShieldVerifier`, dead catches and null checks in `VerificationService`, `SignatureVerificationService` and `YubicoVerifier`, an idempotent existence check and lock guard in `AppendOnlyFileAuditLog`, and hand-rolled hex in favour of `HexFormat`. The rate limiter reads an injected nano clock so that its sweep can be tested at the interval boundary.
+
 ### Audit-log integrity guarantees
 
 A reviewer can independently reproduce the following claims about the hash-chained audit log without any external infrastructure beyond `mvn -B test`:
@@ -133,11 +142,11 @@ A reviewer can make the following assertions by running `mvn -B test`.
 2. **SecurosysVerifierTest.fakeChainIsNotRootedAtPinnedSecurosysRoot** — same, Securosys. Directly substantiates Article 1 §4.2's independence-from-entity claim.
 3. **SecurosysVerifierTest.tamperedSignatureIsRejected** — flipping a byte in a signed attestation blob fails verification.
 4. **SecurosysVerifierTest.emptyChainProducesError** — empty chain is rejection.
-5. **AzureHsmVerifierTest.chainNotRootedAtPinnedTrustAnchorIsRejected** — Azure Managed HSM verification anchors at Microsoft's published attestation CA in production (Marvell LiquidSecurity is the underlying hardware but Microsoft's CA is the practical pinning point); this test confirms the chain-rejection guarantee against the configured trust anchor.
-6. **AzureHsmVerifierTest.missingCertificatesFieldIsRejected** — structural rejection of attestations without `certificates`.
-7. **GoogleCloudHsmVerifierTest.chainNotRootedAtPinnedTrustAnchorIsRejected** — parallel to Azure; Google Cloud HSM verification anchors at Google's published attestation CA in production (Marvell LiquidSecurity is the underlying hardware shared with Azure, but Google's CA is the practical pinning point for Google-deployed HSMs).
+5. **AzureHsmVerifierTest.chainNotUnderPinnedRootIsRejected** — an Azure attestation whose Marvell chain does not end at the pinned Marvell roots is refused. Azure has no Microsoft attestation CA in the path: the chain is Marvell's, and it is the only one checked.
+6. **AzureHsmVerifierTest.incompleteOrUnknownVersionIsRefused** — structural rejection of attestations that are incomplete or of an unknown version.
+7. **GoogleCloudHsmVerifierTest.pinnedRootsRejectTestChain** — parallel to Azure: a chain not under the pinned Marvell root and the pinned Google owner root (Hawksbill Root v1 prod) is refused; `ownerChainIsRequired` adds that the Google owner chain must be present.
 8. **GoogleCloudHsmVerifierTest.emptyChainIsRejected** — empty input fails.
-9. **ReceiptCanonicalizerTest.canonicalBytesStartWithVersionPrefix** — every canonical byte sequence begins `v2|` (it was `v1|` before release 1.4.0 brought `confirmationNonce` inside the signed form). Protects against silent format migrations.
+9. **ReceiptCanonicalizerTest.canonicalBytesStartWithVersionPrefix** — every canonical byte sequence begins `v3|` (`v2|` in 1.4.0–1.5.0, `v1|` before release 1.4.0 brought `confirmationNonce` inside the signed form). Protects against silent format migrations.
 10. **ReceiptCanonicalizerTest.mutatingCompliantFieldChangesCanonicalBytes** — flipping `compliant` produces different canonical bytes; the receipt therefore signs over the compliance decision, not over a ceremonial subset. Directly substantiates Article 2 §8.5's authenticity claim.
 11. **ReceiptCanonicalizerTest.pipeCharactersInFieldsAreEscaped** — no field boundary can be smuggled.
 12. **EphemeralReceiptSignerTest.signAndVerifyRoundTripsAgainstExposedCertificate** — the signer produces RSA signatures verifiable against its own exposed certificate.
@@ -158,12 +167,12 @@ Reviewer takeaway: the gatekeeper verifies attestations deterministically agains
 | `gatekeeper.signing.key-alias` | unset | site-specific | `ConfiguredReceiptSigner.java` |
 | `gatekeeper.signing.algorithm` | `SHA256withRSA` (common sensible default) | match certificate (`SHA384withECDSA` for EC P-384, etc.) | `ConfiguredReceiptSigner.java`; `AppendOnlyFileAuditLog.java` verifies audit-entry signatures with the same algorithm |
 | `gatekeeper.security.mtls.enabled` | `false` (matchIfMissing) — startup emits WARN | `true` in any NCA/EBA deployment | `SecurityConfig.java` |
-| `gatekeeper.security.mtls.principal-regex` | `CN=(.*?)(?:,|$)` | site-specific NCA credential format | `SecurityConfig.java` |
+| `gatekeeper.security.mtls.principal-attribute` | `CN` | site-specific NCA credential format | `SecurityConfig.java` |
 | `server.ssl.trust-store` | unset | path to NCA-issued client-CA bundle | Spring Boot / Tomcat connector |
 | `server.ssl.client-auth` | unset | `need` (hard requirement) | Spring Boot / Tomcat connector |
 | `gatekeeper.confirmation.issuer-ca-bundle-path` | unset — falls back to `classpath:issuer-ca-bundle.pem` placeholder | path to the NCA's issuer-CA bundle PEM | `IssuerCaValidator.java`, `VerificationService.confirmIssuance()` |
 | Spring profile `eba` | `application-eba.yaml` scaffolding | activate for EBA-facing deployment | `src/main/resources/application-eba.yaml` |
-| Spring profile `nca` | `application-nca.yaml` activates mTLS, configured signer, fail-closed signatory rights | activate for NCA-operated deployment | `src/main/resources/application-nca.yaml` |
+| Spring profile `nca` | `application-nca.yaml` activates mTLS and the configured signer (signatory rights are checked on the financial-entity side, in hsm, not here) | activate for NCA-operated deployment | `src/main/resources/application-nca.yaml` |
 
 Notes:
 
@@ -202,17 +211,17 @@ Not closed by any of the above: the reference build still defaults to `Ephemeral
 - **Mitigation in reference.** A verify event and a confirm event, with principal, outcome bit and request and receipt digests, are written to `AppendOnlyFileAuditLog` synchronously on every state change, and the hash chain plus per-entry signature provide tamper-evidence for those entries even if the in-memory map is mutated. Public-key fingerprints, the registry status and the stored certificate are not in the audit log; they are persisted only by `AppendOnlyFileApprovalRegistry`, whose journal is not tamper-evident (`THREAT_MODEL.md`, Tampering). After a restart, supervisory queries served from `/v1/audit/...` reflect the durable state.
 - **Close in production.** Replace `ApprovalRegistry` with a PostgreSQL-backed registry that derives state from the audit log on startup; the hash-chained log remains the canonical record.
 
-### Marvell TLV parser is speculative (High)
+### Marvell attestation format is unconfirmed (High)
 
-- **Risk.** Same concern as in the sibling repo — the Azure/Google attestation blob layout is assumed rather than specified.
-- **Mitigation in reference.** Fail-closed on parse failure.
-- **Close in production.** Replace with a specification-driven parser, shared with the sibling repo.
+- **Risk.** `MarvellAttestation` follows Marvell's published attestation page and the vendors' tools, but whether Azure's and Google's blobs use exactly that layout is unconfirmed.
+- **Mitigation in reference.** Strict parsing inside the signed data; every attribute must be present; `MARVELL_FORMAT_UNCONFIRMED` keeps Azure and Google from ever reaching COMPLIANT.
+- **Close in production.** Commit a real Azure and Google attestation as fixtures, confirm layout and modulus, and set `FORMAT_CONFIRMED_BY_REAL_SAMPLE`. Shared with the sibling repo.
 
 ### Unauthenticated endpoints (High for production)
 
 - **Risk.** The reference default is `gatekeeper.security.mtls.enabled=false`. Anybody with network reach can call `/v1/attestation/{countryCode}/verify`.
 - **Mitigation in reference.** Startup emits a WARN log stating mTLS is disabled and the instance "MUST NOT be deployed to production". `SecurityConfig` hot-swaps between a permissive filter chain and a mTLS-enforced filter chain based on the property.
-- **Close in production.** Set `gatekeeper.security.mtls.enabled=true`, configure `server.ssl.trust-store` + `server.ssl.client-auth=need`, optionally differentiate supervisory roles per `principal-regex` or the `TODO-NCA` extension point.
+- **Close in production.** Set `gatekeeper.security.mtls.enabled=true`, configure `server.ssl.trust-store` + `server.ssl.client-auth=need`, optionally differentiate supervisory roles per `principal-attribute` or the `TODO-NCA` extension point.
 
 ### Request size and batch length (Low — was Medium, now bounded)
 
@@ -224,7 +233,7 @@ Not closed by any of the above: the reference build still defaults to `Ephemeral
 ### Step-7 confirmation replay (Medium)
 
 - **Risk.** An attacker who knows a `verificationId` can flood the gatekeeper with confirmations.
-- **Mitigation in reference.** `VerificationService.confirmIssuance()` requires the submitted issuance certificate to (a) chain to an issuer CA in `IssuerCaValidator`'s trust bundle, and (b) have a public key matching the attested key's fingerprint. Since 1.4.0 the confirmation is also bound to a server-issued single-use nonce, consumed atomically, and — with mTLS enabled — to the principal that performed the verification. A replayed confirmation fails the nonce check and, since 1.5.0, is written to the hash-chained audit log as `ANOMALY_NONCE_MISMATCH`.
+- **Mitigation in reference.** `VerificationService.confirmIssuance()` requires the submitted issuance certificate to (a) chain to an issuer CA in `IssuerCaValidator`'s trust bundle, and (b) have a public key matching the attested key's fingerprint. Since 1.4.0 the confirmation is also bound to a server-issued single-use nonce, consumed atomically, and — with mTLS enabled — to the principal that performed the verification. A replayed confirmation fails the nonce check and, since 1.5.0, is written to the hash-chained audit log as a `CONFIRM` entry with `compliant=false` (an audit entry has no status field; the `ANOMALY_NONCE_MISMATCH` status is in the signed 400 response).
 - **Residual.** With mTLS disabled there is no principal binding; the nonce still prevents reuse.
 
 ### Forward-secure key rotation and RFC 3161 anchoring not implemented (Medium — Article 2 §6.3 scope)
@@ -240,7 +249,7 @@ Not closed by any of the above: the reference build still defaults to `Ephemeral
 | Regulatory source | Code reference |
 | ----------------- | -------------- |
 | DORA Regulation (EU) 2022/2554 Article 6(10) (verification of compliance) | `VerificationService.verify()` + vendor verifiers' `verifyCertChain()` — core claim of Article 1 |
-| DORA Regulation (EU) 2022/2554 Article 17 (incident reporting windows) | Receipt + `ApprovalRegistry` entries carry the `producedAt` timestamp needed to populate DORA Article 17 timelines; the hash-chained audit log preserves the full event stream |
+| DORA Regulation (EU) 2022/2554 Article 17 (incident reporting windows) | Receipt + `ApprovalRegistry` entries carry the timestamps (`verificationTimestamp`, and `confirmationTimestamp` once Step 7 has run) needed to populate DORA Article 17 timelines; the hash-chained audit log preserves the full event stream |
 | DORA Regulation (EU) 2022/2554 Article 19 (substantial incident reports) | Article 2 §8.6 uses the signed receipt stream as the evidence substrate; the audit-export endpoint `/v1/audit/export` is the dump format an investigator hands to the supervisor |
 | DORA Regulation (EU) 2022/2554 Article 28 (contractual arrangements) | Verification occurs at certificate issuance, not per-transaction — matches Article 1's claim that the financial entity retains full verification responsibility irrespective of outsourcing |
 | DORA Regulation (EU) 2022/2554 Article 28(6) (5-year retention with discoverable verifiability) | `AppendOnlyFileAuditLog` provides hash-chained append-only retention and never prunes; `gatekeeper.audit.retention-years` is set to 5 in `application.yaml` but no code reads it, so retention is an operational procedure (`SUPERVISORY_OPERATIONS.md` §5.3); `GET /v1/gatekeeper/keys` and `GET /v1/gatekeeper/anchor` make retroactive verifiability operational |
@@ -268,8 +277,8 @@ Obvious extension points:
 
 1. **Real `ReceiptSigner` backed by the NCA's production signing key.** Wire a PKCS#11 provider against the NCA's secure key store — the production baseline is the organisation certificate the NCA uses for ordinary administrative signing of supervisory acts, hosted in an HSM. Implement via `ConfiguredReceiptSigner`-compatible keystore or a new `ReceiptSigner` subclass.
 2. **Persistent tamper-evident `ApprovalRegistry`.** Back with PostgreSQL; write a sibling `HashChainedApprovalRegistry` that appends each row with a SHA-256 of `(previous_hash || canonical_row_bytes)`; periodically seal the chain head with the `ReceiptSigner` for forward-secure anchoring.
-3. **NCA-role authorisation.** The `SecurityConfig.java` contains a `TODO-NCA` marker. Implement a Spring Security `AccessDecisionVoter` that consults the client certificate's subject or SAN fields against an NCA-role database.
-4. **Rate limiting.** Add a Bucket4j / Resilience4j filter ahead of the controllers. Can be principal-aware once mTLS is on.
+3. **NCA-role authorisation.** `SecurityConfig` maps client-certificate principals to roles from configuration (`gatekeeper.security.roles`). An NCA that keeps its roles in a database replaces that mapping with a lookup against it.
+4. **Rate limiting.** A Bucket4j filter is in place with an in-memory default configuration; a deployment with several instances needs a shared bucket store.
 5. **Step-7 nonce binding.** Implemented: `VerificationService.verify()` returns a 256-bit `confirmationNonce` (SecureRandom, base64url) bound to the `verificationId` in the registry; `confirmIssuance()` requires the FE to echo it back and rejects mismatches with HTTP 400. Extend with a TTL on the bound nonce if deployments need expiry beyond confirm-or-rejected.
 6. **RFC 3161 timestamping.** The Primus HSM operated for the case study has RFC 3161 licensed and activated (HARDWARE_BASELINE.md §3.1); integrating a TSA client into the receipt-signing pipeline closes Article 2 §6.3 STR5.
 7. **Organisational gatekeeper profile.** Add `application-organisation.yaml` activating an organisational (in-ISMS) configuration — different access control, different consumer of the receipt stream (the organisation's own incident-response desk rather than a supervisory authority). This closes Article 2 §1.3's "two deployment forms" characterisation.

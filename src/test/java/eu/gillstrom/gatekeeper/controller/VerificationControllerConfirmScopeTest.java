@@ -94,10 +94,20 @@ class VerificationControllerConfirmScopeTest {
                 .andExpect(status().isNotFound());
     }
 
+    private static IssuanceConfirmationResponse nonceMismatch(String verificationId) {
+        return IssuanceConfirmationResponse.builder()
+                .verificationId(verificationId)
+                .loopClosed(false)
+                .registryStatus(RegistryStatus.ANOMALY_NONCE_MISMATCH)
+                .processedTimestamp(Instant.now().toString())
+                .anomalies(List.of("ANOMALY: nonce"))
+                .signature("c2ln")
+                .build();
+    }
+
     @Test
     void nonceMismatchIsStill400() throws Exception {
-        when(verificationService.confirmIssuance(any(), any()))
-                .thenThrow(new ApprovalRegistry.NonceMismatchException("v-3"));
+        when(verificationService.confirmIssuance(any(), any())).thenReturn(nonceMismatch("v-3"));
 
         mockMvc.perform(post("/v1/attestation/SE/confirm")
                         .contentType("application/json")
@@ -106,15 +116,15 @@ class VerificationControllerConfirmScopeTest {
     }
 
     @Test
-    void nonceMismatchIsLabelledAsANonceMismatch() throws Exception {
-        when(verificationService.confirmIssuance(any(), any()))
-                .thenThrow(new ApprovalRegistry.NonceMismatchException("v-4"));
+    void nonceMismatchIsLabelledAsANonceMismatchAndKeepsTheServiceSignature() throws Exception {
+        when(verificationService.confirmIssuance(any(), any())).thenReturn(nonceMismatch("v-4"));
 
         mockMvc.perform(post("/v1/attestation/SE/confirm")
                         .contentType("application/json")
                         .content(json.writeValueAsString(confirmation("v-4"))))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.registryStatus").value("ANOMALY_NONCE_MISMATCH"));
+                .andExpect(jsonPath("$.registryStatus").value("ANOMALY_NONCE_MISMATCH"))
+                .andExpect(jsonPath("$.signature").value("c2ln"));
     }
 
     private static IssuanceConfirmation confirmation(String verificationId) {

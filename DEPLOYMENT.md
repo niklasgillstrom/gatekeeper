@@ -4,7 +4,7 @@ This document is the single deployment checklist for an NCA (or EBA, during the 
 
 The audience is a **systems engineer** at the NCA who has been asked to bring up a gatekeeper instance against the NCA's existing PKI, mTLS infrastructure and observability stack. Operational responsibilities once the instance is running live in `SUPERVISORY_OPERATIONS.md`. Forensic and inspection procedures live in `FORENSIC_INSPECTION.md`.
 
-The Securosys Primus path is the intended primary path for the case-study deployment. The Yubico path is also production-trustable. The Azure Managed HSM and Google Cloud HSM paths are architectural references and require additional work documented in `PEER_REVIEW_GUIDE.md` "What is placeholder" before they can be used in production.
+The Securosys Primus path is the intended primary path for the case-study deployment. The Crypto4A, Entrust nShield, Fortanix, Thales Luna and Yubico paths can also end in COMPLIANT. The Azure Managed HSM, Google Cloud HSM and Marvell paths are refused with `MARVELL_FORMAT_UNCONFIRMED` until a real attestation confirms the format (`README.md`, "Supported HSM Vendors").
 
 ---
 
@@ -14,17 +14,17 @@ The Securosys Primus path is the intended primary path for the case-study deploy
 
 - **Java 21** (LTS).
 - **Maven ≥ 3.6.3** (enforced by `maven-enforcer-plugin`; recent stable 3.9.x recommended).
-- **`NVD_API_KEY`** environment variable for the OWASP Dependency-Check plugin. Obtain a free key at https://nvd.nist.gov/developers/request-an-api-key. Without it, the first OWASP scan can take 30–60 minutes due to rate-limiting; with it, ~5 minutes.
+- **An NVD API key** for the OWASP Dependency-Check scan, passed by naming an environment variable that holds it: `-DnvdApiKeyEnvironmentVariable=NVD_API_KEY` (see `pom.xml` for why the pom does not wire one in). Obtain a free key at https://nvd.nist.gov/developers/request-an-api-key. Without it, the first scan can take 30–60 minutes due to rate-limiting; with it, ~5 minutes.
 
 Build the production JAR:
 
 ```bash
 mvn -U clean package
-# Or, to skip the OWASP scan during the build itself (run it separately on a schedule):
-mvn -U clean package -Ddependency-check.skip=true
+# The OWASP scan is in the owasp profile (since 1.6.0) and runs separately:
+NVD_API_KEY=... mvn -Powasp verify -DnvdApiKeyEnvironmentVariable=NVD_API_KEY
 ```
 
-The artefact lands in `target/gatekeeper-1.5.0.jar`.
+The artefact lands in `target/gatekeeper-1.6.0.jar`.
 
 ### 1.2 Runtime environment (production host)
 
@@ -88,7 +88,7 @@ A sample `issuer-ca-bundle.pem` ships in the classpath as a placeholder: Getswis
 | `GATEKEEPER_AUDIT_PATH` | Path to the hash-chained audit log journal | No (has default) | `/var/lib/gatekeeper/audit-log.jsonl` |
 | `GATEKEEPER_REGISTRY_PATH` | Path to the file-backed approval-registry journal | No (has default) | `/var/lib/gatekeeper/approval-registry.jsonl` |
 | `GATEKEEPER_RETIRED_KEYS` | Comma-separated PEMs of historical signing certs (for retroactive verification of receipts within retention window; the audit-chain integrity check also accepts entry signatures under them). Never list a compromised key (§9) | No (empty default) | (multiline PEM block, newlines as `\n`) |
-| `NVD_API_KEY` | NVD API key for OWASP scans (build/CI side) | Recommended | (from NVD) |
+| `NVD_API_KEY` | NVD API key for OWASP scans (build/CI side); read only when the build is run with `-DnvdApiKeyEnvironmentVariable=NVD_API_KEY` | Recommended | (from NVD) |
 
 Production secrets (`*_PASSWORD`) MUST come from the NCA's secrets manager, not from a checked-in file. The `application-nca.yaml` references them via `${ENV_VAR:default}` so a secrets injector that exposes them as environment variables (Kubernetes Secret → env, HashiCorp Vault Agent, etc.) works without modification.
 
@@ -110,13 +110,13 @@ Subject:
    CN=Finansinspektionen           ← typically the organisation name
 ```
 
-The default `gatekeeper.security.mtls.principal-regex` extracts `CN`, which works for non-Swedish PKI but is suboptimal for Expisoft-style certs because CN can change at certificate renewal. For Swedish deployments, override to:
+The default `gatekeeper.security.mtls.principal-attribute` is `CN`, which works for non-Swedish PKI but is suboptimal for Expisoft-style certs because CN can change at certificate renewal. For Swedish deployments, override to:
 
 ```yaml
 gatekeeper:
   security:
     mtls:
-      principal-regex: "SERIALNUMBER=(.*?)(?:,|$)"
+      principal-attribute: SERIALNUMBER
 ```
 
 This makes the extracted principal the org-/myndighetsnummer, which is stable across renames and renewals.
@@ -144,7 +144,7 @@ These are **fictional** — they exist so the reference build has working exampl
 gatekeeper:
   security:
     mtls:
-      principal-regex: "SERIALNUMBER=(.*?)(?:,|$)"
+      principal-attribute: SERIALNUMBER
     roles:
       mappings:
         - cn-pattern: "^202100-4235$"             # Finansinspektionen
@@ -154,7 +154,7 @@ gatekeeper:
       default-roles: []                            # deny by default
 ```
 
-Note that `cn-pattern` is a regex matched against the **extracted principal**, regardless of which DN attribute the principal-regex extracted from. The name `cn-pattern` is historical; for Expisoft deployments it is matching on SERIALNUMBER content.
+Note that `cn-pattern` is a regex matched against the **extracted principal**, regardless of which DN attribute principal-attribute names from. The name `cn-pattern` is historical; for Expisoft deployments it is matching on SERIALNUMBER content.
 
 For **finer-grained FE allow-listing** (only specific supervisee org-numbers, not every Swedish AB), expand the pattern to a list of explicit org-numbers:
 
@@ -182,7 +182,7 @@ A separate config overlay (`application-nca-overrides.yaml` loaded via `--spring
 
 The settlement-rail client provisions a single mTLS client certificate per environment (test, production) and the gatekeeper authorises it under the `SETTLEMENT_RAIL` role to call `POST /api/v1/verify`. The reference deployment scenario is documented in the railgate companion repo (`railgate/README.md`).
 
-Public endpoints (`/v1/gatekeeper/keys`, `/v1/gatekeeper/anchor`, `/v1/attestation/health`, `/v1/attestation/supported-vendors`) are reachable without authentication so a relying party can verify retroactive receipt evidence under DORA Article 28(6) without holding a client cert. `/v1/gatekeeper/health` is **not** among them from release 1.4.0: it reports operational state rather than evidence and requires the `SUPERVISOR` role, so a monitoring pipeline calling it needs a client certificate that maps to that role. The OpenAPI document and Swagger UI are disabled in the `nca` and `eba` profiles (`springdoc.*.enabled=false`); they are served only with the `dev` profile, which must not be active on a deployed host.
+Public endpoints (`/v1/gatekeeper/keys`, `/v1/gatekeeper/anchor`, `/v1/attestation/health`, `/v1/attestation/supported-vendors`) need no role, so a relying party can verify retroactive receipt evidence under DORA Article 28(6). Under the `nca` profile the listener requires a client certificate from a trusted CA for every connection (`server.ssl.client-auth: need`), so "public" means that no role is required, not that no certificate is: a relying party without a certificate the trust store accepts cannot complete the TLS handshake. A deployment that must serve these endpoints to holders of no client certificate needs a separate listener or proxy with `client-auth: want` or none. `/v1/gatekeeper/health` is **not** among them from release 1.4.0: it reports operational state rather than evidence and requires the `SUPERVISOR` role, so a monitoring pipeline calling it needs a client certificate that maps to that role. The OpenAPI document and Swagger UI are disabled in the `nca` and `eba` profiles (`springdoc.*.enabled=false`); they are served only with the `dev` profile, which must not be active on a deployed host.
 
 To override the defaults, ship an additional config file (e.g. `application-nca-overrides.yaml`) with the NCA's own patterns and add it to the Spring profile chain via `--spring.config.additional-location=...`.
 
@@ -194,7 +194,7 @@ The first startup of a new deployment should follow this sequence to verify the 
 
 ```bash
 # 1. Verify the JAR exists and has the right version
-java -jar target/gatekeeper-1.5.0.jar --version 2>&1 | head
+java -jar target/gatekeeper-1.6.0.jar --version 2>&1 | head
 
 # 2. Pre-flight: keystore reachability and password correctness
 keytool -list -keystore "$GATEKEEPER_SEAL_KEYSTORE" -storepass "$GATEKEEPER_SEAL_KEYSTORE_PASSWORD" -storetype PKCS12
@@ -202,26 +202,35 @@ keytool -list -keystore "$GATEKEEPER_SERVER_KEYSTORE" -storepass "$GATEKEEPER_SE
 keytool -list -keystore "$GATEKEEPER_TRUSTSTORE" -storepass "$GATEKEEPER_TRUSTSTORE_PASSWORD" -storetype PKCS12
 
 # 3. Boot with the NCA profile
-java -jar target/gatekeeper-1.5.0.jar --spring.profiles.active=nca
+java -jar target/gatekeeper-1.6.0.jar --spring.profiles.active=nca
 
-# 4. In another shell, smoke-test the public endpoints (no client cert needed)
-curl -s --cacert <server-CA> https://gatekeeper.fi.se:8443/v1/gatekeeper/health
-curl -s --cacert <server-CA> https://gatekeeper.fi.se:8443/v1/gatekeeper/keys | jq .
-curl -s --cacert <server-CA> https://gatekeeper.fi.se:8443/v1/gatekeeper/anchor | jq .
+# 4. In another shell, smoke-test the endpoints that need no role. The nca
+#    profile still requires a client certificate at the TLS layer
+#    (client-auth: need), so any certificate the trust store accepts will do.
+curl -s --cacert <server-CA> --cert <client-cert>.pem --key <client-key>.pem \
+     https://gatekeeper.fi.se:8443/v1/attestation/health
+curl -s --cacert <server-CA> --cert <client-cert>.pem --key <client-key>.pem \
+     https://gatekeeper.fi.se:8443/v1/gatekeeper/keys | jq .
+curl -s --cacert <server-CA> --cert <client-cert>.pem --key <client-key>.pem \
+     https://gatekeeper.fi.se:8443/v1/gatekeeper/anchor | jq .
 
 # 5. Smoke-test an authenticated endpoint with a SUPERVISOR client cert
 curl -s --cacert <server-CA> \
      --cert <supervisor-client-cert>.pem \
      --key  <supervisor-client-key>.pem \
-     https://gatekeeper.fi.se:8443/v1/audit/range?from=2026-01-01T00:00:00Z\&to=2026-01-02T00:00:00Z\&inspectionId=BRINGUP-001
+     https://gatekeeper.fi.se:8443/v1/audit/range?from=2026-01-01T00:00:00Z\&to=2026-01-02T00:00:00Z
+curl -s --cacert <server-CA> \
+     --cert <supervisor-client-cert>.pem \
+     --key  <supervisor-client-key>.pem \
+     https://gatekeeper.fi.se:8443/v1/gatekeeper/health
 ```
 
 Expected results:
 
-- Health endpoints return 200 with a status payload.
+- `/v1/attestation/health` returns 200; `/v1/gatekeeper/health` returns 200 with a status payload for the SUPERVISOR certificate.
 - `keys` returns the active receipt-signing certificate plus any retired keys.
 - `anchor` returns a signed chain head (initially the empty-log sentinel hash, signed by the active key).
-- The supervisor-authenticated `/v1/audit/range` returns an empty `entries` array on a fresh deploy, signed by the gatekeeper.
+- The supervisor-authenticated `/v1/audit/range` returns an empty JSON array on a fresh deploy. It is not signed; the signed form is `/v1/audit/export`.
 
 If any of these fails, do NOT enable supervisee traffic; consult the troubleshooting section below.
 
@@ -232,10 +241,10 @@ If any of these fails, do NOT enable supervisee traffic; consult the troubleshoo
 After bring-up, run these negative tests to confirm the security posture:
 
 ```bash
-# A. No client cert → 401 on any non-public endpoint
+# A. No client cert → the TLS handshake fails (client-auth: need); no HTTP status
 curl -sw '%{http_code}\n' --cacert <ca> \
      https://gatekeeper.fi.se:8443/v1/audit/export?inspectionId=NEG-1 -o /dev/null
-# Expected: 401 (or 403 depending on Spring response policy)
+# Expected: curl reports a TLS alert and prints 000
 
 # B. FE client cert → 403 on supervisor endpoints
 curl -sw '%{http_code}\n' --cacert <ca> --cert <fe-cert> --key <fe-key> \
@@ -264,7 +273,7 @@ Once §5 and §6 pass, hand the deployment over to the supervisory operations te
 
 The deployer's responsibilities after handoff are:
 
-- Patching dependencies on the OWASP Dependency-Check schedule (CI runs `mvn dependency-check:check` weekly; high/critical CVEs fail the build).
+- Patching dependencies on the OWASP Dependency-Check schedule (CI runs `mvn -Powasp verify` weekly; high/critical CVEs fail the build).
 - Backup of the journal directory (audit log + approval registry) on the same cadence as other critical NCA records.
 - Disaster-recovery procedure: detailed in §9 below.
 - Marvell trust-anchor rotation if the Azure or Google Cloud HSM paths are in use (see `PEER_REVIEW_GUIDE.md` "Rotation note for cloud-HSM trust anchor").
@@ -275,16 +284,16 @@ The deployer's responsibilities after handoff are:
 
 Both journals are append-only and integrity-protected:
 
-- The audit log is hash-chained and per-entry-signed; chain integrity is checked at startup by `AppendOnlyFileAuditLog.verifyChainIntegrity()` and on every operator-initiated export.
+- The audit log is hash-chained and per-entry-signed; chain integrity is checked at startup (a WARN if the chain does not verify) and by `AppendOnlyFileAuditLog.verifyChainIntegrity()` behind `GET /v1/gatekeeper/health` (cached, `chainCheckedAt`). An export does not run the check; verify the exported chain independently (`FORENSIC_INSPECTION.md`).
 - The approval registry journal is a flat append-only operations log (`REGISTER` / `CONFIRM`); the in-memory index is rebuilt by replaying the journal at startup.
 
 Backup procedure:
 
 1. Snapshot the journal directory (atomic filesystem snapshot, ZFS / LVM / equivalent) at the operator's chosen cadence — at minimum daily for production.
 2. Off-site replicate the snapshot per the NCA's standard backup policy.
-3. To restore: stop the gatekeeper, replace the journal directory contents from the latest snapshot, restart. The startup replay will detect any chain breaks and log them at WARN.
+3. To restore: stop the gatekeeper, replace the journal directory contents from the latest snapshot, restart. The startup replay logs a chain that does not verify at WARN, and refuses to start if a line other than the last does not parse.
 
-The approval registry can be reconstructed from a clean state if the file is lost (rebuild from the audit log's `verify`/`confirm` entries) — this is a recovery procedure, not a backup substitute.
+The approval registry cannot be rebuilt from the audit log: an audit entry holds the verification id, the request and receipt digests, the compliance bit and the principal, but no public-key fingerprint, status, nonce or issued certificate. Losing the registry file without a backup loses the settlement-time lookup for every issued certificate; back it up with the audit log.
 
 ---
 
@@ -292,7 +301,7 @@ The approval registry can be reconstructed from a clean state if the file is los
 
 Two failure modes:
 
-- **Journal corruption (mid-file).** Detected at startup. The service still boots so that supervisors can retrieve evidence and operate normally; the chain-integrity warning surfaces in logs and on the `/v1/gatekeeper/anchor` endpoint. The operator must investigate manually — typical cause is filesystem-level damage. Restore from backup.
+- **Journal corruption (mid-file).** Detected at startup. A line before the last that does not parse stops start-up. A file that parses but whose chain does not verify lets the service boot, so that supervisors can retrieve evidence; the chain-integrity warning surfaces in the logs and as `chainIntact=false` on `GET /v1/gatekeeper/health`. The operator must investigate manually — typical cause is filesystem-level damage. Restore from backup.
 - **Active signing key compromise.** Do **not** add the compromised certificate to `GATEKEEPER_RETIRED_KEYS`: the audit-chain integrity check accepts entry signatures under every retired key, so listing it would let entries forged under it pass (this document said the opposite before 1.5.0, and it contradicted `SUPERVISORY_OPERATIONS.md` §2.3 even then). Publish a compromise notice naming its fingerprint, provision a new key in the secure key store (Section 2.3 of `SUPERVISORY_OPERATIONS.md`), publish the new key via the next chain anchor, and notify supervisees via the supervisor-cooperation channel. Periodic data triangulation (`SUPERVISORY_OPERATIONS.md` §3.5) will surface any receipts an attacker minted under the compromised key in the window between compromise and rotation.
 
 ---
@@ -303,9 +312,10 @@ Two failure modes:
 | --- | --- | --- |
 | Spring Boot fails at startup with `Failed to load Yubico root CA` / `Failed to load attestation trust anchor` | Bundled root cert is corrupted | Restore from a clean checkout — these constants are baked into the source |
 | `EphemeralReceiptSigner initialised` log appears in production | `gatekeeper.signing.mode` is not `configured` (NCA profile not active) | Add `--spring.profiles.active=nca` |
-| 401 on every non-public request despite valid client cert | mTLS is off (`enabled=false`), or truststore does not contain the issuing CA | Confirm `--spring.profiles.active=nca` is set; verify `keytool -list` against the truststore |
+| TLS handshake fails for a client that holds a valid certificate | The trust store does not contain the CA that issued it | Verify `keytool -list` against the trust store |
+| Every request is accepted without a client certificate | mTLS is off (`gatekeeper.security.mtls.enabled=false`), so the open reference chain is active | Confirm `--spring.profiles.active=nca` is set |
 | 403 on every authenticated request | Client cert principal does not match any role pattern | Inspect startup log for "did not match any role mapping" warnings; override role patterns in a config overlay |
-| Slow OWASP scan on first run | NVD API key not set | Export `NVD_API_KEY` and rerun |
+| Slow OWASP scan on first run | NVD API key not set | Export `NVD_API_KEY` and rerun with `-DnvdApiKeyEnvironmentVariable=NVD_API_KEY` |
 | `AppendOnlyFileAuditLog: chain integrity check FAILED` at startup | Journal corruption | Restore from backup; investigate filesystem |
 
 ---

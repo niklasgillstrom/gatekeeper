@@ -48,10 +48,9 @@ public class VerificationResponse {
      * <ul>
      *   <li>Generated from {@link java.security.SecureRandom}.</li>
      *   <li>Base64url-encoded; 32 random bytes (256 bits) before encoding.</li>
-     *   <li>Single-use: the gatekeeper retains the nonce only until the
-     *       matching confirm call (or until a deployment-configurable
-     *       TTL elapses). After consumption, replay of the same nonce is
-     *       rejected.</li>
+     *   <li>Single-use: the gatekeeper retains the nonce until the
+     *       matching confirm call; there is no expiry. After consumption,
+     *       replay of the same nonce is rejected.</li>
      *   <li>Included in the canonical receipt-signing bytes as of
      *       canonical version {@code v2} (see {@code ReceiptCanonicalizer}).
      *       It was excluded under {@code v1} on the reasoning that it was
@@ -79,8 +78,10 @@ public class VerificationResponse {
 
     /**
      * EBA's digital signature over this receipt, in Base64 encoding.
-     * Computed over the canonical JSON representation of all fields
-     * except this signature field itself. Allows any party to verify
+     * Computed over the pipe-separated canonical form of
+     * {@code ReceiptCanonicalizer} (v3), which covers the decision-relevant
+     * fields; {@code errors}, {@code warnings}, {@code summary} and
+     * {@code signingCertificate} are not part of it. Allows any party to verify
      * that this receipt was issued by EBA and has not been tampered with.
      * 
      * In the reference implementation, this uses a self-signed key pair.
@@ -115,9 +116,12 @@ public class VerificationResponse {
 
     private DoraCompliance doraCompliance;
 
-    // === Technical supplier metadata (from request, if provided) ===
+    // === Parties (from the request; supplier fields absent without a technical supplier) ===
 
+    private String customerOrganisationNumber;
+    private String customerSwishNumber;
     private String supplierIdentifier;
+    private String supplierNumber;
     private String supplierName;
     private String keyPurpose;
 
@@ -155,13 +159,13 @@ public class VerificationResponse {
         /** Article 6(10): Financial entity remains fully responsible for verification of compliance. */
         private boolean article6_10;
 
-        /** Article 9(3)(c): Prevent the impairment of authenticity and integrity. */
+        /** Article 9(3)(c): ICT solutions and processes shall "prevent the lack of availability, the impairment of the authenticity and integrity, the breaches of confidentiality and the loss of data". */
         private boolean article9_3c;
 
-        /** Article 9(3)(d): Protection against poor administration, processing risks, human factor. */
+        /** Article 9(3)(d): ICT solutions and processes shall "ensure that data is protected from risks arising from data management, including poor administration, processing-related risks and human error". */
         private boolean article9_3d;
 
-        /** Article 9(4)(d): Strong authentication mechanisms based on dedicated control systems. */
+        /** Article 9(4)(d): financial entities shall "implement policies and protocols for strong authentication mechanisms, based on relevant standards and dedicated control systems, and protection measures of cryptographic keys whereby data is encrypted based on results of approved data classification and ICT risk assessment processes". */
         private boolean article9_4d;
 
         /** Article 28(1)(a): Financial entity at all times remains fully responsible. */

@@ -160,32 +160,25 @@ public class VerificationController {
     public ResponseEntity<IssuanceConfirmationResponse> confirmIssuance(
             @PathVariable String countryCode,
             @Valid @RequestBody IssuanceConfirmation confirmation) {
-        try {
-            IssuanceConfirmationResponse response =
-                    verificationService.confirmIssuance(confirmation, countryCode.toUpperCase());
-            if (response.getRegistryStatus()
-                    == IssuanceConfirmationResponse.RegistryStatus.ANOMALY_UNKNOWN_VERIFICATION) {
-                // 404, matching the documented contract. The body is the
-                // service's own anomaly response and is identical whichever
-                // of the three causes applies; the audit entry recording the
-                // attempt has already been appended.
-                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
-            }
-            return ResponseEntity.ok(response);
-        } catch (ApprovalRegistry.NonceMismatchException e) {
-            // Step-7 replay attempt — nonce did not match the one bound at
-            // verify time. Return 400 with a structured body rather than
-            // 500; the FE has supplied a malformed (or replayed) request.
-            // The registry has already logged the mismatch at WARN and the
-            // service has appended a CONFIRM audit entry for it.
-            IssuanceConfirmationResponse rejection = new IssuanceConfirmationResponse();
-            rejection.setVerificationId(confirmation.getVerificationId());
-            rejection.setRegistryStatus(IssuanceConfirmationResponse.RegistryStatus.ANOMALY_NONCE_MISMATCH);
-            rejection.setAnomalies(java.util.List.of(
-                    "Confirmation nonce does not match the nonce bound to verificationId at verify time. "
-                  + "Possible Step-7 replay attempt; the gatekeeper has logged this as a security event."));
-            return ResponseEntity.badRequest().body(rejection);
+        IssuanceConfirmationResponse response =
+                verificationService.confirmIssuance(confirmation, countryCode.toUpperCase());
+        if (response.getRegistryStatus()
+                == IssuanceConfirmationResponse.RegistryStatus.ANOMALY_UNKNOWN_VERIFICATION) {
+            // 404, matching the documented contract. The body is the
+            // service's own anomaly response and is identical whichever
+            // of the three causes applies; the audit entry recording the
+            // attempt has already been appended.
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
         }
+        if (response.getRegistryStatus()
+                == IssuanceConfirmationResponse.RegistryStatus.ANOMALY_NONCE_MISMATCH) {
+            // Step-7 replay attempt: the nonce did not match the one bound at
+            // verify time. 400 with the service's signed response; the
+            // registry has logged the mismatch at WARN and the service has
+            // appended a CONFIRM audit entry for it.
+            return ResponseEntity.badRequest().body(response);
+        }
+        return ResponseEntity.ok(response);
     }
 
     // =========================================================================
@@ -254,8 +247,9 @@ public class VerificationController {
         summary = "List anomalies in the registry for this jurisdiction",
         description = """
             Returns the registry entries for {countryCode} with anomalous status:
-            certificates issued despite rejection, public key mismatches,
-            or confirmations for unknown verification IDs.
+            certificates issued despite rejection and public key mismatches.
+            Confirmations for unknown verification IDs have no registry entry
+            and appear in the audit log only.
             Each anomaly represents a potential active circumvention of
             the supervisory mechanism.""")
     public ResponseEntity<List<ApprovalRegistry.RegistryEntry>> registryAnomalies(
@@ -312,7 +306,17 @@ public class VerificationController {
             new VendorInfo("AZURE", "Microsoft Azure Managed HSM",
                 "Requires: attestationData (JSON from az keyvault key get-attestation)"),
             new VendorInfo("GOOGLE", "Google Cloud HSM",
-                "Requires: attestationData (base64), attestationCertChain")
+                "Requires: attestationData (base64), attestationCertChain"),
+            new VendorInfo("MARVELL", "Marvell LiquidSecurity HSM",
+                "Requires: attestationData (base64 of attest.dat), attestationCertChain (partition and card certificates)"),
+            new VendorInfo("THALES", "Thales Luna HSM",
+                "Requires: attestationData (base64 of the PKC from cmu getpkc)"),
+            new VendorInfo("CRYPTO4A", "Crypto4A QASM",
+                "Requires: attestationData (the QASM attestation message, base64 or PEM)"),
+            new VendorInfo("FORTANIX", "Fortanix DSM",
+                "Requires: attestationData (the DSM key attestation JSON)"),
+            new VendorInfo("ENTRUST", "Entrust nShield",
+                "Requires: attestationData (the nfkmattest key attestation bundle JSON)")
         ));
     }
 

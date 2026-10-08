@@ -31,8 +31,8 @@ import eu.gillstrom.gatekeeper.model.VerificationResponse;
 public interface ReceiptSigner {
 
     /**
-     * The canonical signer identifier ({@code REFERENCE-EPHEMERAL} or the
-     * certificate serial + issuer DN for the configured variant) — intended
+     * The canonical signer identifier ({@code REFERENCE-EPHEMERAL}, or the
+     * certificate's subject DN and serial for the configured variant) — intended
      * for operational diagnostics, not for cryptographic decisions.
      */
     String getSignerIdentifier();
@@ -50,7 +50,7 @@ public interface ReceiptSigner {
      * field addition that is decision-relevant MUST be added to the canonical
      * form or it will not be covered by the signature.</p>
      *
-     * @return Base64-encoded detached signature
+     * @return the detached signature bytes ({@link #signInto} base64-encodes them)
      */
     byte[] sign(byte[] canonicalReceipt);
 
@@ -60,6 +60,17 @@ public interface ReceiptSigner {
     String getSigningCertificatePem();
 
     String getSignatureAlgorithm();
+
+    /**
+     * Helper that populates {@code signature} and {@code signingCertificate}
+     * on the provided response, using {@link ReceiptCanonicalizer} to compute
+     * the canonical byte representation.
+     */
+    default void signInto(eu.gillstrom.gatekeeper.model.IssuanceConfirmationResponse confirmation) {
+        byte[] canonical = ConfirmationCanonicalizer.canonicalize(confirmation);
+        confirmation.setSignature(java.util.Base64.getEncoder().encodeToString(sign(canonical)));
+        confirmation.setSigningCertificate(getSigningCertificatePem());
+    }
 
     /**
      * Helper that populates {@code signature} and {@code signingCertificate}

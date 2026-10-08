@@ -14,8 +14,9 @@ import java.util.StringJoiner;
  * pipe character so ambiguity between field separators and field contents
  * is impossible. Null fields are rendered as the empty string; boolean fields
  * render as {@code true} / {@code false}; instants as ISO-8601 with offset
- * {@code Z}. A {@code v1} version marker is prefixed so that future canonical
- * changes can be introduced non-ambiguously.</p>
+ * {@code Z}. A version marker ({@code v3}, see {@link #CANONICAL_VERSION}) is
+ * prefixed so that future canonical changes can be introduced
+ * non-ambiguously.</p>
  *
  * <p>If a future receipt field becomes decision-relevant it MUST be added
  * here, and the version marker MUST be bumped. Signatures produced under
@@ -47,14 +48,38 @@ public final class ReceiptCanonicalizer {
     private ReceiptCanonicalizer() {
     }
 
-    public static final String CANONICAL_VERSION = "v2";
+    public static final String CANONICAL_VERSION = "v3";
+
+    /**
+     * The form before 1.6.0, without the customer's organisation and Swish
+     * numbers and the supplier number. Receipts signed then are retained for
+     * five years and stay verifiable with it.
+     */
+    public static final String PREVIOUS_VERSION = "v2";
 
     public static byte[] canonicalize(VerificationResponse r) {
+        return canonicalize(r, CANONICAL_VERSION);
+    }
+
+    /** Whether the receipt carries a field that only {@link #CANONICAL_VERSION} signs. */
+    public static boolean hasCurrentOnlyFields(VerificationResponse r) {
+        return r.getCustomerOrganisationNumber() != null || r.getCustomerSwishNumber() != null
+                || r.getSupplierNumber() != null;
+    }
+
+    /**
+     * @param version {@link #CANONICAL_VERSION} or {@link #PREVIOUS_VERSION}
+     */
+    public static byte[] canonicalize(VerificationResponse r, String version) {
         if (r == null) {
             throw new IllegalArgumentException("Receipt must not be null");
         }
+        boolean current = CANONICAL_VERSION.equals(version);
+        if (!current && !PREVIOUS_VERSION.equals(version)) {
+            throw new IllegalArgumentException("Unknown canonical version " + version);
+        }
         StringJoiner j = new StringJoiner("|");
-        j.add(CANONICAL_VERSION);
+        j.add(version);
         j.add(safe(r.getVerificationId()));
         j.add(safe(r.getConfirmationNonce()));
         j.add(Boolean.toString(r.isCompliant()));
@@ -64,7 +89,14 @@ public final class ReceiptCanonicalizer {
         j.add(safe(r.getHsmVendor()));
         j.add(safe(r.getHsmModel()));
         j.add(safe(r.getHsmSerialNumber()));
+        if (current) {
+            j.add(safe(r.getCustomerOrganisationNumber()));
+            j.add(safe(r.getCustomerSwishNumber()));
+        }
         j.add(safe(r.getSupplierIdentifier()));
+        if (current) {
+            j.add(safe(r.getSupplierNumber()));
+        }
         j.add(safe(r.getSupplierName()));
         j.add(safe(r.getKeyPurpose()));
         j.add(safe(r.getCountryCode()));

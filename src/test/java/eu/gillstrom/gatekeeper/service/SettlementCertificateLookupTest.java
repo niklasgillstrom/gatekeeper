@@ -72,11 +72,17 @@ class SettlementCertificateLookupTest {
                 mock(YubicoVerifier.class),
                 mock(AzureHsmVerifier.class),
                 mock(GoogleCloudHsmVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.MarvellHsmVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.ThalesLunaVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.Crypto4AVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.FortanixVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.NShieldVerifier.class),
                 registry,
                 new EphemeralReceiptSigner(2048),
                 issuerCaValidator,
                 auditLog,
                 principalResolver,
+                KeyPolicy.defaults(),
                 false);
     }
 

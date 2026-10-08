@@ -2,6 +2,269 @@
 
 This file starts at 1.4.0. Earlier releases are documented in the git history and in `CROSS_REFERENCE.md`.
 
+## 1.6.0 (2026-10-08)
+
+### Security
+
+- **The attestation evidence is kept.** The registry entry now stores the
+  verification request as submitted (`submission`): public key, attestation
+  data, signature, chain and parties. Until now only its digest was kept, in
+  the audit log, so the supervisor depended on the supervised financial
+  entity for the evidence and could not repeat a verification, for instance
+  after a verifier was corrected. `VerificationService.requestDigestBase64`
+  recomputes the audited digest from a stored submission.
+  `SUPERVISORY_OPERATIONS.md` §3.5 step 6 uses it. Tests:
+  `PartiesRecordedTest.theAttestationEvidenceIsKeptAndMatchesTheAuditedDigest`,
+  `AppendOnlyFileApprovalRegistryJournalTest.theSubmissionIsJournalledAndReplayedWithTheSameDigest`.
+- **Customer and technical supplier recorded and signed.** A verification
+  request now carries `customerOrganisationNumber` and `customerSwishNumber`
+  and, when a technical supplier holds the key, `supplierIdentifier` (its
+  organisation number) and the new `supplierNumber` (its 987 number). A
+  customer without a technical supplier has no supplier fields. The registry
+  stores them (also in the journal), the receipt echoes them, and the
+  request digest in the audit log covers them, so the supervisor can compare
+  who holds each verified key with the banks' customer registers
+  (`SUPERVISORY_OPERATIONS.md` §3.5, new source 5 and step 5). **Breaking:**
+  the receipt canonical form is `v3` (customer and supplier fields inside the
+  signed form; hsm 1.6.0 moves in step). `v2` receipts stay verifiable with
+  `ReceiptCanonicalizer.canonicalize(receipt, "v2")`. Bean Validation: the
+  customer's Swish number must be 123…, the supplier number 987…, and a
+  supplier number needs a supplier identifier. Tests: `PartiesRecordedTest`
+  (4), `AppendOnlyFileApprovalRegistryJournalTest.thePartiesAreJournalledAndReplayed`,
+  `WireFormatGoldenBytesTest.thePreviousVersionIsTheFormReleasesBefore160Signed`
+  and the v3 golden bytes.
+- **The nonce-mismatch refusal of a confirmation was unsigned.** Every
+  other confirmation response carries `signature` and `signingCertificate`,
+  as this changelog and the README say, but the 400 answer to a replayed
+  or wrong `confirmationNonce` was built in the controller without them.
+  The service now builds, signs and audits it, and the controller returns
+  it with 400. Tests: `ConfirmBindingTest.theNonceMismatchRefusalIsSigned`,
+  `VerificationControllerConfirmScopeTest`.
+- **Documentation aligned with the code** (a review of every document
+  against the code): settlement lookup is by the issued certificate, not by
+  fingerprint, so an entry awaiting Step 7 or recorded as an anomaly answers
+  `CERT_NOT_FOUND`; under the `nca` profile even the endpoints that need no
+  role require a client certificate at the TLS layer; mid-file audit-log
+  corruption stops start-up while a chain that does not verify only warns;
+  the receipt digest covers the canonical form, not the JSON; the approval
+  registry cannot be rebuilt from the audit log; three roles, not two; no
+  nonce TTL; the receipt canonical form is `v2`; the issuer-CA validator
+  falls back to the bundled reference bundle; the `eba` profile has no
+  endpoints of its own; the unused `swish.signatory-rights` block is removed
+  from `application-nca.yaml`; the NVD key is passed with
+  `-DnvdApiKeyEnvironmentVariable` (the plugin never read `-Dnvd.api.key`);
+  stale test names, vendor counts and the `TODO-NCA` marker corrected.
+
+- **Build:** Jackson 3.1.7 and 2.21.7 instead of the 3.1.5 and 2.21.5 that
+  Spring Boot 4.1.1 manages (CVE-2026-83557, listed as fixed in 3.1.6 and
+  2.21.6); `project.build.outputTimestamp`, so the same commit builds to a
+  byte-identical jar (two builds of railgate compared: different hashes
+  without it, identical with it); and the OWASP Dependency-Check scan moved
+  to the `owasp` profile (`mvn -Powasp verify`), so a build without
+  network access or NVD key can run the tests.
+
+- **End-to-end test (`e2e/`) follows the 1.6.0 services.** hsm and railgate
+  now refuse to start without TLS, so the local run sets their development
+  overrides (`swish.gatekeeper.allow-insecure-http`,
+  `railgate.server.allow-insecure-http`); the BankID binding it prints is
+  hsm's mandate, `hsm-mandate:v1;org=…;swish=…;count=1`; and its settlement references are
+  UETRs (36 characters) instead of `e2e-<uuid>` (40), which railgate now
+  refuses. Run against the three 1.6.0 builds: 8 tests pass, and the 6 that
+  need a real BankID signature or the HSM's private key are skipped, as
+  `e2e/README.md` describes.
+- **`SecurosysVerifier.verifyChain` returned true for any input.** It is
+  not called by the verification flow, but it is the interface's chain
+  check; it now runs the same PKIX validation under the pinned root
+  (`SecurosysVerifierTest.verifyChainValidatesAgainstThePinnedRoot`).
+- **`RequestSizeLimitFilter` had no tests.** It now has four
+  (`RequestSizeLimitFilterTest`): a declared length above the cap is 413
+  before the body is read, a length at the cap passes, a chunked body is
+  counted while read, and a non-positive cap is refused at start-up. Four of
+  five guard mutants are killed; the fifth (`declared >= 0` to `>= 1`) only
+  routes an empty body through the counting wrapper and is equivalent.
+
+- **Settlement resolves the registry entry through the issued certificate.**
+  `SignatureVerificationService` looked the entry up by public-key
+  fingerprint and, when the request carried a certificate PEM, never compared
+  that PEM with anything. Two consequences, both reproduced by tests that
+  fail against 1.5.0:
+  - Any FE could make another FE's settlements fail. It confirmed its own
+    verification with the victim's public certificate; the resulting
+    `ANOMALY_PUBLIC_KEY_MISMATCH` entry carried the victim's key fingerprint,
+    was the newest match, and every later settlement of the victim returned
+    `CERT_NON_COMPLIANT` with the attacker's `auditEntryId`.
+  - A key that was verified but never issued settled with a self-signed
+    certificate, because an entry awaiting Step 7 (`status == null`) or
+    confirmed `VERIFIED_NOT_ISSUED` counted as settlement-compliant.
+
+  The entry is now resolved by `(serial, issuer)` among certificates stored at
+  a confirmation that ended in `VERIFIED_AND_ISSUED`, a supplied PEM must be
+  byte-identical to that stored certificate, and only `VERIFIED_AND_ISSUED`
+  settles. This reverses the 1.5.0 decision that an entry awaiting Step 7
+  keeps settling; hsm's `INTEGRATION_GUIDE.md` already requires that a
+  certificate is not delivered before its confirmation completes.
+- **Certificate validity at settlement.** No validity period was checked;
+  an expired certificate settled. The stored certificate must now be within
+  its validity period at the time of the call; otherwise the answer is the new
+  reason `CERT_EXPIRED` (railgate maps an unknown reason to
+  `CERT_NON_COMPLIANT`, so it denies either way).
+- **Order of checks.** Malformed digest or signature input is reported as
+  `MALFORMED_INPUT` first; the certificate is then resolved before the
+  signature is checked, so `CERT_NOT_FOUND` now comes with
+  `signatureValid=false`.
+- Tests: `SettlementLookupTest` (5, against the real
+  `InMemoryApprovalRegistry`, all failing against 1.5.0). The fake registries
+  in `SignatureVerificationServiceTest` and
+  `SignatureVerificationControllerTest` now look entries up by issued
+  certificate, as the real ones do;
+  `allowsSettlementWhileStillAwaitingConfirmation` became
+  `deniesSettlementWhileStillAwaitingConfirmation`, and
+  `looksUpByActualPublicKeyFingerprintWhenPrimaryFingerprintDiffers` became
+  `looksUpByIssuedCertificateNotByFingerprint`.
+- **mTLS principal is read from the encoded subject.** The principal was
+  taken with a regular expression (`principal-regex`, default
+  `CN=(.*?)(?:,|$)`) over the RFC 2253 string. It stopped at an escaped
+  comma, so `CN=Acme AB\, Stockholm` and `CN=Acme AB\, Malmo` both became
+  `Acme AB\` and shared one identity for confirm binding, rate limiting and
+  the audit log; it fell back to the whole DN when the attribute was missing,
+  so role patterns were matched against a DN; and the documented
+  `SERIALNUMBER=(.*?)` never matched, because `X500Principal.getName()`
+  renders that attribute as `2.5.4.5=#13..` hex. The new
+  `gatekeeper.security.mtls.principal-attribute` (default `CN`; `SERIALNUMBER`
+  or a dotted OID also work) names the attribute; its exact value is the
+  principal, and a subject in which it is missing or repeated is not
+  authenticated. `principal-regex` was removed; setting it fails start-up so
+  that a SERIALNUMBER deployment cannot silently fall back to CN. Tests:
+  `SubjectAttributePrincipalExtractorTest` (5).
+- **Yubico: missing or critical capabilities extension.** The fix hsm made
+  in 1.4.0 had not been ported. `YubicoVerifier` read only non-critical
+  extensions and did not notice a missing capabilities extension
+  (1.3.6.1.4.1.41482.4.5), so an attestation without it reported the key as
+  not exportable although nothing had been parsed. Both critical and
+  non-critical extensions are now read, and a missing capabilities extension
+  adds `YUBICO_CAPABILITIES_MISSING`. Tests:
+  `YubicoVerifierTest.missingCapabilitiesExtensionIsRejected` and
+  `attestationExtensionsMarkedCriticalAreRead`, both failing before.
+- **Signed confirmation response.** The Step-7 response
+  (`IssuanceConfirmationResponse`) was unsigned: anyone able to answer the
+  confirm call (a TLS-terminating proxy, a wrong host) could return
+  `loopClosed=true` with the right `verificationId`, and hsm recorded the
+  supervisory loop as closed. Every confirmation response, including the
+  unknown-verification anomaly, now carries `signature` and
+  `signingCertificate`, made with the receipt key over the new
+  `ConfirmationCanonicalizer` form `c1`. hsm 1.6.0 verifies it; hsm 1.5.0
+  ignores the two fields. Tests: `ConfirmationCanonicalizerGoldenBytesTest`
+  (2; the literal is identical in hsm) and
+  `IssuanceConfirmationCertificateTest.confirmationResponseIsSignedOverItsCanonicalBytes`.
+- **Securosys key origin is read from the attestation.** `SecurosysVerifier`
+  never read `<private_key creation="...">`, and `VerificationService` set
+  `generatedOnDevice` from `never_extractable` and `always_sensitive`, which
+  are not origin attributes. The root element must now be `private_key` with
+  `creation="generated"` (`SECUROSYS_KEY_NOT_GENERATED` otherwise), and
+  `generatedOnDevice` is taken from that attribute. The verifier is again
+  identical to hsm's. Tests: three in `SecurosysVerifierTest`, the two
+  rejections failing before the change. PSS-signed Securosys attestations
+  remain unsupported and are rejected.
+- **Azure and Google: Marvell parser rebuilt from the vendors' tools.** The
+  verifiers parsed a format of their own that matches neither vendor's tool,
+  and `AzureHsmVerifier` took the public key from the unsigned JWK in the
+  JSON. `MarvellAttestation`, identical to hsm's, ports Microsoft's
+  MIT-licensed parser and validator and Google's owner-chain check; the key is
+  bound only through the modulus or EKCV in the signed blob (Marvell's
+  published attestation page and `verify_pubkey.py`), and
+  EXTRACTABLE=false, NEVER_EXTRACTABLE=true and LOCAL=true are required. The
+  Marvell roots are the two in Microsoft's validator (the 2015 root expired
+  2025-11-16). No real attestation has been run through it, so both verifiers
+  add `MARVELL_FORMAT_UNCONFIRMED` and neither vendor reaches COMPLIANT, as
+  before. Tests: `MarvellAttestationTest` (12), `AzureHsmVerifierTest` (6,
+  replacing 2), `GoogleCloudHsmVerifierTest` (8, replacing 3).
+- **Physical Marvell LiquidSecurity HSMs as a fifth vendor (`MARVELL`).**
+  The hardware behind Azure and Google signs its own key attestation when a
+  key is generated. `MarvellHsmVerifier` checks the manufacturer chain
+  (pinned Marvell roots → card → partition), the signature and the same key
+  evidence as the cloud verifiers. Never valid until a real attestation
+  confirms the format (`MARVELL_FORMAT_UNCONFIRMED`). Tests:
+  `MarvellHsmVerifierTest` (5).
+- **Thales Luna as a sixth vendor (`THALES`).** A Luna HSM issues a Public
+  Key Confirmation (PKC) only for keys it generated and that cannot leave a
+  Luna HSM (Thales documentation). `ThalesLunaVerifier` checks the PKC chain
+  as Thales's MIT-licensed `luna-pkc-validator` does (signature, issuer, EKU
+  per position, CA flag, validity) under the pinned Chrysalis-ITS Root key,
+  and that the Proof of Origin key is the CSR key. Two published copies of
+  the root (serials 804500000007 and 80450000000D) carry that key. Thales's
+  own PKC and CSR test vector verifies, so this vendor is not behind a
+  format gate. Tests: `ThalesLunaVerifierTest` (8; all five guard mutants
+  are killed).
+  `AttestationSignatureValidityTest.genuineThalesLunaPkcSetsEveryArticleBit`
+  shows the test vector reaching COMPLIANT.
+- **Crypto4A QASM as a seventh vendor (`CRYPTO4A`).** `Crypto4AVerifier`
+  follows Crypto4A's attestation specification (C4A-302-0043): every
+  signature block (ECDSA P-384 and HSS/LMS) must verify over the DER claims,
+  carry the attestation EKU and chain to the pinned C4A_RCA key, as
+  `spa-attest verify` checks them. The key's `key-spki` must be the CSR key
+  and the same object must carry private-key class, `key-is-confined`,
+  `key-is-hardware-generated` and `key-never-extracted`, plus
+  `qasm-certified-production` and `attestation-keys-are-unique`. The PKI
+  Consortium's published QASM message verifies, both signatures included.
+  Its OIDs (`1.3.6.1.4.1.39901.6.2.x`) match Crypto4A's specification; the
+  PKI Consortium page lists them one level too deep. Tests:
+  `Crypto4AVerifierTest` (10; all eleven guard mutants are killed).
+  `AttestationSignatureValidityTest.genuineCrypto4AMessageSetsEveryArticleBit`
+  shows the message reaching COMPLIANT.
+- **Fortanix DSM as an eighth vendor (`FORTANIX`).** `FortanixVerifier`
+  follows Fortanix's "Verifying Key Attestation Statements": the Key
+  Attestation Authority certificate by PKIX with Fortanix's attestation
+  policy to the pinned Fortanix root, its EKU and Key Usage; the statement
+  signed by the authority, naming it as issuer, with no unknown critical
+  extension and a signing time within the authority's validity and not in
+  the future; the statement's key must be the CSR key and carry
+  `fortanixKeyGeneratedInDSM` and `fortanixKeyNeverExportable`. Validation
+  happens at the signing time, as Fortanix prescribes for its one-month
+  authority certificates. The sample in Fortanix's documentation verifies.
+  Tests: `FortanixVerifierTest` (7; all twelve guard mutants are killed).
+  `AttestationSignatureValidityTest.genuineFortanixStatementSetsEveryArticleBit`
+  shows the sample reaching COMPLIANT.
+- **Key policy: RSA-4096 only by default.** Gatekeeper did not check the key
+  itself, so any key with a valid attestation was COMPLIANT, including the
+  RSA-2048 and EC P-256 keys of the Thales, Crypto4A and Fortanix samples.
+  Swish signing keys are RSA-4096, which hsm already enforces at the CSR.
+  `KeyPolicy` (`gatekeeper.key-policy.allowed-keys`, default `RSA-4096`) now
+  makes any other key NON-COMPLIANT with `KEY_NOT_ALLOWED`; the attestation
+  is still verified and reported, the article bits describe it, and Article
+  28(1)(a) and the summary follow the overall finding. Tests: `KeyPolicyTest`,
+  `AttestationSignatureValidityTest.defaultPolicyRefusesEveryKeyButRsa4096`
+  (the three samples, each refused with only the key error) and
+  `keyPolicyFailureIsListedWithAttestationFailures`; the sample tests now run
+  under a policy that also allows the samples' keys.
+- **Entrust nShield as a ninth vendor (`ENTRUST`).** `NShieldVerifier`, the
+  same as hsm's: warrant from the pinned KWARN-1 key, module state, world
+  binding and key generation certificates, and the generation-time ACL; a
+  key the Administrator Card Set can recover is refused under Art. 9(3)(d).
+  Only `ModuleInformation` warrants are accepted: Entrust states that
+  `FieldUpgradeModuleInformation` certificates depend on legacy DSA-1024
+  signatures, which NIST SP 800-131A no longer allows to be made. Tests:
+  `NShieldVerifierTest` (25; all 75 guard mutants are killed in hsm) and
+  `AttestationSignatureValidityTest.entrustsFieldUpgradeBundlesSetNoArticleBit`
+  (Entrust's two examples carry such warrants and set no article bit).
+
+### Tests
+
+- **Mutation testing.** A `pit` profile (`mvn -Ppit test-compile
+  org.pitest:pitest-maven:mutationCoverage`, PIT 1.30.0, `-Dpit.threads=N`)
+  runs over every production class and fails below 100 %. First run 1,682
+  of 2,278 detected; now 2,203 of 2,203 (2,194 killed, 9 timed out). New
+  tests cover the rate limiter per request and its sweep on a controllable
+  clock, a registry contract run against both implementations, every vendor
+  branch of `VerificationService`, the audit log's locking, loading,
+  permissions and integrity cache, the controllers, the mTLS role matrix of
+  the `nca` profile, and mutation tests for all nine verifiers. Redundant
+  constructs whose mutants no test could kill were removed, not suppressed
+  (see `PEER_REVIEW_GUIDE.md`, Mutation testing). `java.io.FileDescriptor`
+  is in `avoidCallsTo`: a removed fsync is observable only by a power cut.
+- **`application-nca.yaml`** gains an illustrative `SETTLEMENT_RAIL` role
+  mapping (`^RAIL-.*$|^railgate-.*$`). The profile mapped no principal to
+  `SETTLEMENT_RAIL`, so railgate could not reach `/api/v1/verify` under it.
+
 ## 1.5.0
 
 Every item below is a defect that was present in 1.4.0. As before, where a defect had a reason for surviving review, that reason is stated. The test suite now runs 160 test executions (each parameterised test counted once per registry implementation), 7 of them from the documentation-versus-code review whose findings are folded into the sections below, all green under `mvn verify`; the regression test for each defect fails against the 1.4.0 code, either on its assertions or, where it calls a method this release adds, at compilation. A few controls next to them pass on 1.4.0 by design — the unmodified Securosys attestation in `AttestationSignatureValidityTest`, the missing-intermediate case in `IssuanceConfirmationCertificateTest` — to show that a fix did not simply turn everything off.

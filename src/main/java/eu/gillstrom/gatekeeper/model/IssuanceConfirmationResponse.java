@@ -63,6 +63,16 @@ public class IssuanceConfirmationResponse {
      */
     private java.util.List<String> anomalies;
 
+    /**
+     * Base64 signature over {@link eu.gillstrom.gatekeeper.signing.ConfirmationCanonicalizer#canonicalize},
+     * made with the same key as the verification receipt. Added in 1.6.0;
+     * before that the response was unsigned.
+     */
+    private String signature;
+
+    /** PEM-encoded signing certificate, as on the verification receipt. */
+    private String signingCertificate;
+
     public enum RegistryStatus {
         /** Attestation approved, certificate issued, public key matches. */
         VERIFIED_AND_ISSUED,

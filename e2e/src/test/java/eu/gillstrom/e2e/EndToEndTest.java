@@ -144,6 +144,8 @@ class EndToEndTest {
                 "--spring.profiles.active=dev",
                 "--swish.gatekeeper.mode=http",
                 "--swish.gatekeeper.url=" + gatekeeper.baseUri(),
+                // The local gatekeeper listens on plain HTTP (local-only).
+                "--swish.gatekeeper.allow-insecure-http=true",
                 "--swish.gatekeeper.country-code=" + COUNTRY,
                 "--swish.gatekeeper.trusted-keys=" + trustedKeyPem,
                 "--swish.issuance.mode=mock",
@@ -162,6 +164,9 @@ class EndToEndTest {
         railgate = track(ServiceProcess.start("railgate", ServiceProcess.freePort(), List.of(
                 "--railgate.gatekeeper.base-url=" + gatekeeper.baseUri(),
                 "--railgate.gatekeeper.allow-insecure-http=true",
+                // railgate's own listener without TLS (local-only; railgate
+                // refuses to start like this otherwise).
+                "--railgate.server.allow-insecure-http=true",
                 "--railgate.payment-network.mode=file",
                 "--railgate.payment-network.file=" + paymentNetworkFile,
                 "--spring.security.user.name=" + RAILGATE_USER,
@@ -414,7 +419,7 @@ class EndToEndTest {
     @Order(9)
     void railgateAuthenticatesAndDefaultDeniesWithoutPaymentNetworkArtefacts() throws Exception {
         ObjectNode request = Http.JSON.createObjectNode();
-        request.put("transactionReference", "e2e-" + UUID.randomUUID());
+        request.put("transactionReference", UUID.randomUUID().toString() /* a UETR; railgate accepts at most 36 characters */);
         request.put("localInstrumentCode", "SWISH");
         request.put("debtorIsOrganization", true);
         request.put("creditorIsPrivatePerson", true);
@@ -479,7 +484,7 @@ class EndToEndTest {
 
     private synchronized String recordPayment(String certSerial, String issuerDn, String digestHex,
                                               String signatureBase64) throws IOException {
-        String reference = "e2e-" + UUID.randomUUID();
+        String reference = UUID.randomUUID().toString() /* a UETR; railgate accepts at most 36 characters */;
         String line = String.join("\t", reference, certSerial, issuerDn, digestHex, signatureBase64) + "\n";
         Files.writeString(paymentNetworkFile, line, StandardCharsets.UTF_8,
                 java.nio.file.StandardOpenOption.APPEND);

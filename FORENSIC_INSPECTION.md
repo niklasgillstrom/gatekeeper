@@ -103,7 +103,7 @@ A forensic verifier must be able to recompute every digest and verify every sign
 
 - **Algorithm:** as configured via `gatekeeper.signing.algorithm`. The reference default is `SHA256withRSA` for RSA seals; production NCA deployments using EC seals select `SHA384withECDSA` or per the seal's certified algorithm.
 - **Signature encoding:** standard Base64 with `=` padding.
-- **Signed input for receipts:** `ReceiptCanonicalizer.canonicalize(VerificationResponse)` — a UTF-8 byte sequence beginning with `v2|` (`v1|` for receipts issued before release 1.4.0; a receipt is re-verified with the canonicaliser version its own prefix names).
+- **Signed input for receipts:** `ReceiptCanonicalizer.canonicalize(VerificationResponse)` — a UTF-8 byte sequence beginning with `v3|`. A receipt issued under 1.4.0–1.5.0 is re-verified with `ReceiptCanonicalizer.canonicalize(receipt, "v2")`, the form without the customer fields and the supplier number. The code no longer produces `v1` (before 1.4.0); such a receipt needs the 1.3 canonicaliser from the repository history.
 - **Signed input for audit entries:** `thisEntryHashHex.getBytes(UTF_8)`. Signing the hex form of the chain hash, rather than the raw 32-byte digest, keeps the signature input identical to what is published in the JSON Lines storage form, which simplifies retroactive verification.
 - **Signed input for export bundles:** `AuditExport.canonicalBytesForSignature(...)` — the pipe-separated UTF-8 string `v1|inspectionId|generatedAt|rangeFrom|rangeTo|entryCount|chainHeadHashAtExport|signingKeyFingerprintHex`, followed by `|thisEntryHashHex` for each entry in the window; `%` and `|` inside string fields are escaped as `%25` and `%7C`, and instants are rendered by `Instant.toString()`.
 
@@ -111,7 +111,7 @@ A forensic verifier must be able to recompute every digest and verify every sign
 
 - **Format:** PEM (`-----BEGIN CERTIFICATE-----` ... `-----END CERTIFICATE-----`), one certificate per blob. The signing certificate is published with its issuer chain via `GET /v1/gatekeeper/keys`.
 - **Issuer:** the operator certificate is the NCA's organisation certificate, issued by the CA that the NCA uses for ordinary administrative signing of supervisory acts (typically a domestic CA or eID infrastructure provider). The verifier validates the chain to that issuer using PKIX `CertPathValidator`.
-- **Validity:** a forensic verifier checks both `notBefore` / `notAfter` and revocation status (CRL / OCSP) at the time of the original signature, not at the time of verification. A certificate that was valid at signing time and has since expired or been revoked still produces a valid signature.
+- **Validity:** a forensic verifier checks both `notBefore` / `notAfter` and revocation status at the time of the original signature, not at the time of verification. Swish signing certificates carry no CRL distribution point and no OCSP address (checked on a certificate issued by `SEB Customer CA1 v2 for Swish`), so the revocation status has to be requested from the issuing CA, the bank, under DORA Article 50(1)(a). The gatekeeper does not record revocations (`CROSS_REFERENCE.md`, GAP item 5). A certificate that was valid at signing time and has since expired or been revoked still produces a valid signature.
 
 ### 4.4 Cross-repo wire-format compatibility
 

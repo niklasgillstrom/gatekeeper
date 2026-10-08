@@ -7,6 +7,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.web.util.matcher.IpAddressMatcher;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
 /**
@@ -104,6 +106,7 @@ public class RateLimitInterceptor implements HandlerInterceptor {
 
     private final List<IpAddressMatcher> trustedProxies;
 
+    @Autowired
     public RateLimitInterceptor(
             @Value("${gatekeeper.ratelimit.verify.capacity:600}") long verifyCapacity,
             @Value("${gatekeeper.ratelimit.verify.refill-seconds:60}") long verifyRefillSeconds,
@@ -118,17 +121,29 @@ public class RateLimitInterceptor implements HandlerInterceptor {
             @Value("${gatekeeper.ratelimit.max-tracked-keys:10000}") int maxTrackedKeys,
             @Value("${gatekeeper.ratelimit.key-idle-seconds:900}") long keyIdleSeconds,
             @Value("${gatekeeper.ratelimit.trusted-proxies:}") String trustedProxyList) {
+        this(verifyCapacity, verifyRefillSeconds, batchCapacity, batchRefillSeconds,
+                registryCapacity, registryRefillSeconds, settlementCapacity, settlementRefillSeconds,
+                auditCapacity, auditRefillSeconds, maxTrackedKeys, keyIdleSeconds, trustedProxyList,
+                System::nanoTime);
+    }
+
+    /** As above, with the clock the key sweep reads; tests pass a controllable one. */
+    RateLimitInterceptor(long verifyCapacity, long verifyRefillSeconds, long batchCapacity,
+                         long batchRefillSeconds, long registryCapacity, long registryRefillSeconds,
+                         long settlementCapacity, long settlementRefillSeconds, long auditCapacity,
+                         long auditRefillSeconds, int maxTrackedKeys, long keyIdleSeconds,
+                         String trustedProxyList, LongSupplier nanoClock) {
 
         this.verifyBuckets = new BucketStore("verify", verifyCapacity,
-                Duration.ofSeconds(verifyRefillSeconds), maxTrackedKeys, keyIdleSeconds);
+                Duration.ofSeconds(verifyRefillSeconds), maxTrackedKeys, keyIdleSeconds, nanoClock);
         this.batchBuckets = new BucketStore("batch", batchCapacity,
-                Duration.ofSeconds(batchRefillSeconds), maxTrackedKeys, keyIdleSeconds);
+                Duration.ofSeconds(batchRefillSeconds), maxTrackedKeys, keyIdleSeconds, nanoClock);
         this.registryBuckets = new BucketStore("registry", registryCapacity,
-                Duration.ofSeconds(registryRefillSeconds), maxTrackedKeys, keyIdleSeconds);
+                Duration.ofSeconds(registryRefillSeconds), maxTrackedKeys, keyIdleSeconds, nanoClock);
         this.settlementBuckets = new BucketStore("settlement", settlementCapacity,
-                Duration.ofSeconds(settlementRefillSeconds), maxTrackedKeys, keyIdleSeconds);
+                Duration.ofSeconds(settlementRefillSeconds), maxTrackedKeys, keyIdleSeconds, nanoClock);
         this.auditBuckets = new BucketStore("audit", auditCapacity,
-                Duration.ofSeconds(auditRefillSeconds), maxTrackedKeys, keyIdleSeconds);
+                Duration.ofSeconds(auditRefillSeconds), maxTrackedKeys, keyIdleSeconds, nanoClock);
 
         this.trustedProxies = parseTrustedProxies(trustedProxyList);
 
@@ -146,9 +161,7 @@ public class RateLimitInterceptor implements HandlerInterceptor {
 
     private static List<IpAddressMatcher> parseTrustedProxies(String raw) {
         List<IpAddressMatcher> matchers = new ArrayList<>();
-        if (raw == null || raw.isBlank()) {
-            return List.copyOf(matchers);
-        }
+        // Blank tokens are skipped below, so an empty list needs no special case.
         for (String token : raw.split(",")) {
             String cidr = token.trim();
             if (cidr.isEmpty()) {
@@ -199,10 +212,7 @@ public class RateLimitInterceptor implements HandlerInterceptor {
             return true;
         }
 
-        long retryAfterSeconds = TimeUnit.NANOSECONDS.toSeconds(probe.getNanosToWaitForRefill());
-        if (retryAfterSeconds < 1) {
-            retryAfterSeconds = 1;
-        }
+        long retryAfterSeconds = Math.max(1, TimeUnit.NANOSECONDS.toSeconds(probe.getNanosToWaitForRefill()));
 
         log.warn("Rate limit exceeded for principal='{}' on path='{}' (bucket={}); retry-after={}s",
                 principal, path, store.name(), retryAfterSeconds);
@@ -300,13 +310,13 @@ public class RateLimitInterceptor implements HandlerInterceptor {
         String v = raw;
         if (v.startsWith("[")) {
             int close = v.indexOf(']');
-            if (close < 0) {
+            if (close == -1) {
                 return null;
             }
             v = v.substring(1, close);
         } else {
             int colon = v.indexOf(':');
-            if (colon >= 0 && v.indexOf(':', colon + 1) < 0) {
+            if (colon >= 0 && v.indexOf(':', colon + 1) == -1) {
                 // Exactly one colon: IPv4 with a port.
                 v = v.substring(0, colon);
             }
@@ -375,10 +385,15 @@ public class RateLimitInterceptor implements HandlerInterceptor {
 
         private final ConcurrentHashMap<String, Holder> map = new ConcurrentHashMap<>();
         private final Bucket overflowBucket;
-        private final AtomicLong lastSweepNanos = new AtomicLong(System.nanoTime());
-        private final AtomicLong overflowWarned = new AtomicLong(0);
+        private final LongSupplier clock;
+        private final AtomicLong lastSweepNanos;
+        private final java.util.concurrent.atomic.AtomicBoolean overflowWarned =
+                new java.util.concurrent.atomic.AtomicBoolean();
 
-        BucketStore(String name, long capacity, Duration refill, int maxKeys, long keyIdleSeconds) {
+        BucketStore(String name, long capacity, Duration refill, int maxKeys, long keyIdleSeconds,
+                    LongSupplier clock) {
+            this.clock = clock;
+            this.lastSweepNanos = new AtomicLong(clock.getAsLong());
             this.name = name;
             this.capacity = capacity;
             this.refill = refill;
@@ -395,7 +410,7 @@ public class RateLimitInterceptor implements HandlerInterceptor {
         }
 
         Bucket bucketFor(String key) {
-            long now = System.nanoTime();
+            long now = clock.getAsLong();
             Holder existing = map.get(key);
             if (existing != null) {
                 existing.lastAccessNanos = now;
@@ -403,7 +418,7 @@ public class RateLimitInterceptor implements HandlerInterceptor {
             }
             maybeSweep(now);
             if (map.size() >= maxKeys) {
-                if (overflowWarned.compareAndSet(0, now)) {
+                if (overflowWarned.compareAndSet(false, true)) {
                     log.warn("Rate-limit bucket map '{}' reached its ceiling of {} keys. "
                             + "New keys now share a single overflow bucket. This is the "
                             + "expected response to key flooding; if it happens under "
@@ -412,8 +427,8 @@ public class RateLimitInterceptor implements HandlerInterceptor {
                 }
                 return overflowBucket;
             }
-            Holder holder = map.computeIfAbsent(key, k -> new Holder(newBucket(), System.nanoTime()));
-            holder.lastAccessNanos = System.nanoTime();
+            Holder holder = map.computeIfAbsent(key, k -> new Holder(newBucket(), now));
+            holder.lastAccessNanos = now;
             return holder.bucket;
         }
 
@@ -426,13 +441,7 @@ public class RateLimitInterceptor implements HandlerInterceptor {
                 // Another thread is sweeping; one sweep per interval is enough.
                 return;
             }
-            int before = map.size();
             map.entrySet().removeIf(e -> now - e.getValue().lastAccessNanos > idleNanos);
-            int removed = before - map.size();
-            if (removed > 0) {
-                log.debug("Rate-limit bucket map '{}': swept {} idle key(s), {} remaining",
-                        name, removed, map.size());
-            }
         }
 
         private Bucket newBucket() {

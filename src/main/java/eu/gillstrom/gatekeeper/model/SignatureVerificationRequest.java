@@ -25,8 +25,10 @@ import lombok.NoArgsConstructor;
  *
  * <p>Two paths are supported for locating the certificate's public key:
  * <ul>
- *   <li>If {@code signingCertificatePem} is supplied, it is used directly;
- *       {@code certSerial} and {@code issuerDn} are then not consulted.</li>
+ *   <li>If {@code signingCertificatePem} is supplied, it must be byte-identical
+ *       to the certificate stored for {@code (certSerial, issuerDn)};
+ *       otherwise the answer is {@code CERT_NOT_FOUND}. The public key is
+ *       always taken from the stored certificate.</li>
  *   <li>If absent, gatekeeper looks up the certificate stored at Step-7
  *       confirmation under {@code (certSerial, issuerDn)}: {@code certSerial}
  *       is hexadecimal, case-insensitive, with an optional {@code 0x}
@@ -91,9 +93,9 @@ public class SignatureVerificationRequest {
     private String signatureBase64;
 
     /**
-     * Optional PEM-encoded signing certificate. If supplied, used directly
-     * for public-key extraction. If absent, gatekeeper looks up the cert
-     * stored at Step-7 confirmation.
+     * Optional PEM-encoded signing certificate. If supplied, it must equal the
+     * certificate stored at Step-7 confirmation for {@code (certSerial,
+     * issuerDn)}; the public key is taken from the stored certificate.
      */
     @Size(max = MAX_CERT_PEM_LENGTH, message = "signingCertificatePem exceeds the maximum accepted length")
     private String signingCertificatePem;

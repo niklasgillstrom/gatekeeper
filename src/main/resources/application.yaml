@@ -33,6 +33,11 @@ spring:
       max-request-size: 2MB
 
 gatekeeper:
+  key-policy:
+    # Keys a verification may find compliant, as RSA-<bits> or EC-<curve>
+    # (comma-separated, case-insensitive). Any other key is NON-COMPLIANT
+    # whatever its attestation shows. Swish signing keys are RSA-4096.
+    allowed-keys: ${GATEKEEPER_ALLOWED_KEYS:RSA-4096}
   limits:
     # Maximum accepted HTTP request body, enforced by
     # RequestSizeLimitFilter (Spring Boot has no equivalent property for

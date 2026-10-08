@@ -22,7 +22,7 @@
 
     <groupId>eu.gillstrom</groupId>
     <artifactId>e2e</artifactId>
-    <version>1.5.0</version>
+    <version>1.6.0</version>
     <name>Local end-to-end harness (hsm, gatekeeper, railgate)</name>
     <description>
         Local-only test harness. Starts the already-built hsm, gatekeeper and

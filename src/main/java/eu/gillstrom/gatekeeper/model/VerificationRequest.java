@@ -1,6 +1,7 @@
 package eu.gillstrom.gatekeeper.model;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
 import java.util.List;
@@ -68,7 +69,7 @@ public class VerificationRequest {
     /**
      * HSM vendor identifier.
      * Required to select the correct attestation verification logic.
-     * Supported: YUBICO, SECUROSYS, AZURE, GOOGLE
+     * Supported: YUBICO, SECUROSYS, AZURE, GOOGLE, MARVELL, THALES, CRYPTO4A, FORTANIX, ENTRUST
      */
     @NotBlank(message = "HSM vendor is required for verification")
     @Size(max = 32, message = "HSM vendor identifier exceeds the maximum accepted length")
@@ -93,7 +94,8 @@ public class VerificationRequest {
 
     /**
      * Attestation certificate chain (excluding root which is verified on server).
-     * Required for all vendors.
+     * Read for Securosys, Yubico, Google Cloud HSM and Marvell; the other
+     * vendors' verifiers read only {@code attestationData}.
      *
      * <p>Both the chain length and each element are bounded. The element
      * constraint is a Bean Validation container-element constraint, so it
@@ -106,18 +108,42 @@ public class VerificationRequest {
 
     // === Optional metadata for batch/audit purposes ===
 
+    // Parties. Not used in cryptographic verification; recorded in the
+    // registry and echoed in the signed receipt, so the supervisor can
+    // compare who holds the key with the banks' customer registers. A
+    // customer without a technical supplier has no supplier fields.
+
+    /** Organisation number of the customer the certificate is for (10 or 12 digits). */
+    @Pattern(regexp = "^\\d{10}(\\d{2})?$", message = "customerOrganisationNumber must be 10 or 12 digits")
+    private String customerOrganisationNumber;
+
+    /** The customer's Swish number (123 followed by 7 digits). */
+    @Pattern(regexp = "^123\\d{7}$", message = "customerSwishNumber must be 123 followed by 7 digits")
+    private String customerSwishNumber;
+
     /**
      * Optional: Technical supplier identifier (e.g. organisation number) for audit trail.
-     * Not used in cryptographic verification — purely for EBA's records.
+     * Absent when the customer has no technical supplier.
      */
     @Size(max = 64, message = "supplierIdentifier exceeds the maximum accepted length")
     private String supplierIdentifier;
+
+    /** Optional: the technical supplier's number (987 followed by 7 digits). */
+    @Pattern(regexp = "^987\\d{7}$", message = "supplierNumber must be 987 followed by 7 digits")
+    private String supplierNumber;
 
     /**
      * Optional: Technical supplier name for audit trail.
      */
     @Size(max = 256, message = "supplierName exceeds the maximum accepted length")
     private String supplierName;
+
+    /** A supplier number names a supplier, so it needs the supplier's identifier as well. */
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    @jakarta.validation.constraints.AssertTrue(message = "supplierNumber requires supplierIdentifier")
+    public boolean isSupplierNumberWithIdentifier() {
+        return supplierNumber == null || (supplierIdentifier != null && !supplierIdentifier.isBlank());
+    }
 
     /**
      * Optional: Description of the key's purpose (e.g. "Swish payment signing").

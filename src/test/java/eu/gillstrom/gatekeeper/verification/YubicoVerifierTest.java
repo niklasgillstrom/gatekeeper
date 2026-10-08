@@ -195,15 +195,52 @@ class YubicoVerifierTest {
         assertThat(r.isValid()).isTrue();
     }
 
+    @Test
+    void missingCapabilitiesExtensionIsRejected() throws Exception {
+        // Origin present, capabilities extension absent. The exportability
+        // flags default to false, which reads as "not exportable"; an absent
+        // attribute must not count as a satisfied one.
+        KeyPair kp = TestPki.newRsaKeyPair(2048);
+        X509Certificate cert = attestationCertificate(kp, new byte[] {0x01}, null);
+
+        YubicoVerifier.YubicoAttestationResult r = new YubicoVerifier()
+                .verifyYubicoAttestation(List.of(TestPki.toPem(cert)), kp.getPublic());
+
+        assertThat(r.getErrors()).anyMatch(e -> e.startsWith("YUBICO_CAPABILITIES_MISSING"));
+        assertThat(r.isValid()).isFalse();
+    }
+
+    @Test
+    void attestationExtensionsMarkedCriticalAreRead() throws Exception {
+        // Yubico marks the extensions non-critical, but a certificate that
+        // marks them critical must not have them skipped.
+        KeyPair kp = TestPki.newRsaKeyPair(2048);
+        X509Certificate cert = attestationCertificate(kp, new byte[] {0x01}, EXPORTABLE_UNDER_WRAP_CAPABILITY, true);
+
+        YubicoVerifier.YubicoAttestationResult r = new YubicoVerifier()
+                .verifyYubicoAttestation(List.of(TestPki.toPem(cert)), kp.getPublic());
+
+        assertThat(r.isExportableUnderWrap()).isTrue();
+        assertThat(r.getErrors()).anyMatch(e -> e.contains("export capabilities"));
+    }
+
     private static X509Certificate attestationCertificate(KeyPair kp, byte[] origin, byte[] capabilities)
             throws Exception {
+        return attestationCertificate(kp, origin, capabilities, false);
+    }
+
+    /** {@code capabilities == null} leaves the capabilities extension out. */
+    private static X509Certificate attestationCertificate(KeyPair kp, byte[] origin, byte[] capabilities,
+            boolean critical) throws Exception {
         X500Name subject = new X500Name("CN=YubiHSM Attestation id:0x0001");
         long now = System.currentTimeMillis();
         X509v3CertificateBuilder b = new JcaX509v3CertificateBuilder(
                 subject, BigInteger.valueOf(now), new Date(now - 60_000L), new Date(now + 3600_000L),
                 subject, kp.getPublic());
-        b.addExtension(new ASN1ObjectIdentifier(ORIGIN_OID), false, new DERBitString(origin));
-        b.addExtension(new ASN1ObjectIdentifier(CAPABILITIES_OID), false, new DERBitString(capabilities));
+        b.addExtension(new ASN1ObjectIdentifier(ORIGIN_OID), critical, new DERBitString(origin));
+        if (capabilities != null) {
+            b.addExtension(new ASN1ObjectIdentifier(CAPABILITIES_OID), critical, new DERBitString(capabilities));
+        }
         return new JcaX509CertificateConverter().getCertificate(
                 b.build(new JcaContentSignerBuilder("SHA256withRSA").build(kp.getPrivate())));
     }

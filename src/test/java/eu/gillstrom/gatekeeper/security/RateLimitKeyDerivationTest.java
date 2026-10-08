@@ -116,4 +116,22 @@ class RateLimitKeyDerivationTest {
         // An attacker-supplied key must not be able to be arbitrarily long.
         assertThat(RateLimitInterceptor.normaliseIp("1".repeat(200))).isNull();
     }
+
+    @Test
+    void normaliseIpBoundaries() {
+        // 255 is the largest octet, and an IPv6 literal may start with a colon.
+        assertThat(RateLimitInterceptor.normaliseIp("255.255.255.255")).isEqualTo("255.255.255.255");
+        assertThat(RateLimitInterceptor.normaliseIp("256.0.0.1")).isNull();
+        assertThat(RateLimitInterceptor.normaliseIp("::1")).isEqualTo("::1");
+        assertThat(RateLimitInterceptor.normaliseIp("[::1]:443")).isEqualTo("::1");
+        // A bare port is not an address.
+        assertThat(RateLimitInterceptor.normaliseIp(":80")).isNull();
+        assertThat(RateLimitInterceptor.normaliseIp("[2001:db8::1")).isNull();
+        // The 64-character cap, at the boundary: a bracketed literal plus trailing text.
+        String literal = "::" + "a".repeat(43);
+        String atCap = "[" + literal + "]" + "x".repeat(64 - 47);
+        assertThat(atCap).hasSize(64);
+        assertThat(RateLimitInterceptor.normaliseIp(atCap)).isEqualTo(literal);
+        assertThat(RateLimitInterceptor.normaliseIp(atCap + "x")).isNull();
+    }
 }

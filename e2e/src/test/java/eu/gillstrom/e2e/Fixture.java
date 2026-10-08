@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.List;
 
 record Fixture(
@@ -42,9 +41,10 @@ record Fixture(
     }
 
     String bankIdBinding() {
-        return "hsm-csr:v1;org=" + ORGANISATION_NUMBER
+        // A mandate for one certificate; hsm reads it and no longer binds a CSR.
+        return "hsm-mandate:v1;org=" + ORGANISATION_NUMBER
                 + ";swish=" + SWISH_NUMBER
-                + ";csr-sha256=" + HexFormat.of().formatHex(Pem.sha256(Pem.csrDer(csrPem)));
+                + ";count=1";
     }
 
     ObjectNode gatekeeperVerifyRequest() {
@@ -52,6 +52,8 @@ record Fixture(
         node.put("publicKey", csrPem);
         node.put("hsmVendor", hsmVendor);
         putAttestation(node);
+        node.put("customerOrganisationNumber", ORGANISATION_NUMBER);
+        node.put("customerSwishNumber", SWISH_NUMBER);
         node.put("supplierIdentifier", ORGANISATION_NUMBER);
         node.put("supplierName", "e2e harness (gatekeeper-direct)");
         node.put("keyPurpose", "Swish SIGNING");

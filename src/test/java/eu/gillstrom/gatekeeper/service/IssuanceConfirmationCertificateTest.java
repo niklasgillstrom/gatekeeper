@@ -32,10 +32,13 @@ class IssuanceConfirmationCertificateTest {
     Path tempDir;
 
     private InMemoryApprovalRegistry registry;
+    private AppendOnlyFileAuditLog auditLog;
     private VerificationService service;
     private KeyPair leafKp;
     private X509Certificate intermediate;
     private X509Certificate leaf;
+
+    private final EphemeralReceiptSigner signer = new EphemeralReceiptSigner(2048);
 
     @BeforeEach
     void setUp() throws Exception {
@@ -50,7 +53,7 @@ class IssuanceConfirmationCertificateTest {
         Path bundle = tempDir.resolve("issuer-ca-bundle.pem");
         Files.writeString(bundle, TestPki.toPem(root), StandardCharsets.UTF_8);
 
-        AppendOnlyFileAuditLog auditLog = new AppendOnlyFileAuditLog(
+        auditLog = new AppendOnlyFileAuditLog(
                 tempDir.resolve("audit.jsonl").toString(), new EphemeralReceiptSigner(2048));
         auditLog.initialise();
 
@@ -63,11 +66,17 @@ class IssuanceConfirmationCertificateTest {
                 mock(YubicoVerifier.class),
                 mock(AzureHsmVerifier.class),
                 mock(GoogleCloudHsmVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.MarvellHsmVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.ThalesLunaVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.Crypto4AVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.FortanixVerifier.class),
+                mock(eu.gillstrom.gatekeeper.verification.NShieldVerifier.class),
                 registry,
-                new EphemeralReceiptSigner(2048),
+                signer,
                 new IssuerCaValidator(bundle.toString()),
                 auditLog,
                 new MtlsPrincipalResolver(),
+                KeyPolicy.defaults(),
                 false);
     }
 
@@ -79,6 +88,31 @@ class IssuanceConfirmationCertificateTest {
         confirmation.setSigningCertificatePem(signingCertificatePem);
         confirmation.setTimestamp(Instant.now().toString());
         return confirmation;
+    }
+
+    @Test
+    void confirmationResponseIsSignedOverItsCanonicalBytes() throws Exception {
+        IssuanceConfirmationResponse response = service.confirmIssuance(
+                issuance(TestPki.toPem(leaf) + TestPki.toPem(intermediate)), "SE");
+
+        assertThat(response.getSigningCertificate()).isEqualTo(signer.getSigningCertificatePem());
+        java.security.PublicKey key = ((X509Certificate) java.security.cert.CertificateFactory
+                .getInstance("X.509").generateCertificate(new java.io.ByteArrayInputStream(
+                        response.getSigningCertificate().getBytes(StandardCharsets.UTF_8))))
+                .getPublicKey();
+        byte[] signature = java.util.Base64.getDecoder().decode(response.getSignature());
+
+        assertThat(verifies(key, response, signature)).isTrue();
+        response.setLoopClosed(!response.isLoopClosed());
+        assertThat(verifies(key, response, signature)).as("a flipped loopClosed must not verify").isFalse();
+    }
+
+    private static boolean verifies(java.security.PublicKey key, IssuanceConfirmationResponse response,
+            byte[] signature) throws Exception {
+        java.security.Signature s = java.security.Signature.getInstance("SHA256withRSA");
+        s.initVerify(key);
+        s.update(eu.gillstrom.gatekeeper.signing.ConfirmationCanonicalizer.canonicalize(response));
+        return s.verify(signature);
     }
 
     @Test
@@ -121,5 +155,87 @@ class IssuanceConfirmationCertificateTest {
         assertThat(response.isLoopClosed()).isFalse();
         assertThat(response.getRegistryStatus()).isEqualTo(RegistryStatus.ANOMALY_PUBLIC_KEY_MISMATCH);
         assertThat(response.getAnomalies()).anyMatch(a -> a.contains("not issued by a trusted issuer CA"));
+    }
+
+    private boolean auditedAsCompliant(String verificationId) {
+        eu.gillstrom.gatekeeper.audit.AuditEntry entry =
+                auditLog.findByVerificationId(verificationId).orElseThrow();
+        assertThat(entry.operation()).isEqualTo("CONFIRM");
+        return entry.compliant();
+    }
+
+    @Test
+    void aCleanConfirmationClosesTheLoopAndIsAuditedAsCompliant() throws Exception {
+        IssuanceConfirmationResponse response = service.confirmIssuance(
+                issuance(TestPki.toPem(leaf) + TestPki.toPem(intermediate)), "SE");
+
+        assertThat(response.isLoopClosed()).isTrue();
+        assertThat(response.getRegistryStatus()).isEqualTo(RegistryStatus.VERIFIED_AND_ISSUED);
+        assertThat(auditedAsCompliant("VID-7")).isTrue();
+    }
+
+    @Test
+    void anAnomalousConfirmationIsAuditedAsNonCompliant() {
+        service.confirmIssuance(issuance(null), "SE");
+
+        assertThat(auditedAsCompliant("VID-7")).isFalse();
+    }
+
+    @Test
+    void aWithdrawnIssuanceClosesTheLoopWithoutAKeyComparison() {
+        IssuanceConfirmation withdrawn = issuance(null);
+        withdrawn.setIssued(false);
+
+        IssuanceConfirmationResponse response = service.confirmIssuance(withdrawn, "SE");
+
+        assertThat(response.isLoopClosed()).isTrue();
+        assertThat(response.getPublicKeyMatch()).isNull();
+        assertThat(response.getRegistryStatus()).isEqualTo(RegistryStatus.VERIFIED_NOT_ISSUED);
+        assertThat(response.getSignature()).isNotBlank();
+        assertThat(auditedAsCompliant("VID-7")).isTrue();
+    }
+
+    @Test
+    void aConfirmationForAnUnknownVerificationIsSignedAndAudited() {
+        IssuanceConfirmation unknown = issuance(null);
+        unknown.setVerificationId("NO-SUCH-ID");
+
+        IssuanceConfirmationResponse response = service.confirmIssuance(unknown, "SE");
+
+        assertThat(response.isLoopClosed()).isFalse();
+        assertThat(response.getRegistryStatus()).isEqualTo(RegistryStatus.ANOMALY_UNKNOWN_VERIFICATION);
+        assertThat(response.getSignature()).isNotBlank();
+        assertThat(auditedAsCompliant("NO-SUCH-ID")).isFalse();
+    }
+
+    @Test
+    void issuanceAfterARejectedVerificationIsACriticalAnomaly() throws Exception {
+        registry.register("VID-REJ", "nonce-rej", false, Fingerprints.ofPublicKey(leafKp.getPublic()),
+                "556000-0000", "Svensk TL", null, null, "SE");
+        IssuanceConfirmation issued = issuance(TestPki.toPem(leaf) + TestPki.toPem(intermediate));
+        issued.setVerificationId("VID-REJ");
+        issued.setConfirmationNonce("nonce-rej");
+
+        IssuanceConfirmationResponse response = service.confirmIssuance(issued, "SE");
+
+        assertThat(response.isLoopClosed()).isFalse();
+        assertThat(response.getRegistryStatus()).isEqualTo(RegistryStatus.ANOMALY_ISSUED_DESPITE_REJECTION);
+        assertThat(response.getAnomalies()).anyMatch(a -> a.startsWith("CRITICAL ANOMALY: Certificate issued despite"));
+        assertThat(auditedAsCompliant("VID-REJ")).isFalse();
+    }
+
+    @Test
+    void aRejectedVerificationThatIsNotIssuedStaysRejected() {
+        registry.register("VID-REJ2", "nonce-rej2", false, "fp", "556000-0000", "Svensk TL", null, null, "SE");
+        IssuanceConfirmation notIssued = issuance(null);
+        notIssued.setVerificationId("VID-REJ2");
+        notIssued.setConfirmationNonce("nonce-rej2");
+        notIssued.setIssued(false);
+
+        IssuanceConfirmationResponse response = service.confirmIssuance(notIssued, "SE");
+
+        assertThat(response.isLoopClosed()).isTrue();
+        assertThat(response.getAnomalies()).isEmpty();
+        assertThat(response.getRegistryStatus()).isEqualTo(RegistryStatus.REJECTED_NOT_ISSUED);
     }
 }

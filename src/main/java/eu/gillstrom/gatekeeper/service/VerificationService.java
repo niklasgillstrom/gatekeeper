@@ -16,6 +16,11 @@ import eu.gillstrom.gatekeeper.model.VerificationResponse.DoraCompliance;
 import eu.gillstrom.gatekeeper.model.VerificationResponse.KeyProperties;
 import eu.gillstrom.gatekeeper.verification.AzureHsmVerifier;
 import eu.gillstrom.gatekeeper.verification.GoogleCloudHsmVerifier;
+import eu.gillstrom.gatekeeper.verification.MarvellHsmVerifier;
+import eu.gillstrom.gatekeeper.verification.ThalesLunaVerifier;
+import eu.gillstrom.gatekeeper.verification.Crypto4AVerifier;
+import eu.gillstrom.gatekeeper.verification.FortanixVerifier;
+import eu.gillstrom.gatekeeper.verification.NShieldVerifier;
 import eu.gillstrom.gatekeeper.verification.SecurosysVerifier;
 import eu.gillstrom.gatekeeper.verification.YubicoVerifier;
 
@@ -61,11 +66,17 @@ public class VerificationService {
     private final YubicoVerifier yubicoVerifier;
     private final AzureHsmVerifier azureVerifier;
     private final GoogleCloudHsmVerifier googleVerifier;
+    private final MarvellHsmVerifier marvellVerifier;
+    private final ThalesLunaVerifier thalesVerifier;
+    private final Crypto4AVerifier crypto4aVerifier;
+    private final FortanixVerifier fortanixVerifier;
+    private final NShieldVerifier nshieldVerifier;
     private final ApprovalRegistry approvalRegistry;
     private final ReceiptSigner receiptSigner;
     private final IssuerCaValidator issuerCaValidator;
     private final AuditLog auditLog;
     private final MtlsPrincipalResolver principalResolver;
+    private final KeyPolicy keyPolicy;
 
     /**
      * Whether the confirm-time principal binding is enforced. Follows
@@ -83,11 +94,17 @@ public class VerificationService {
             YubicoVerifier yubicoVerifier,
             AzureHsmVerifier azureVerifier,
             GoogleCloudHsmVerifier googleVerifier,
+            MarvellHsmVerifier marvellVerifier,
+            ThalesLunaVerifier thalesVerifier,
+            Crypto4AVerifier crypto4aVerifier,
+            FortanixVerifier fortanixVerifier,
+            NShieldVerifier nshieldVerifier,
             ApprovalRegistry approvalRegistry,
             ReceiptSigner receiptSigner,
             IssuerCaValidator issuerCaValidator,
             AuditLog auditLog,
             MtlsPrincipalResolver principalResolver,
+            KeyPolicy keyPolicy,
             @org.springframework.beans.factory.annotation.Value(
                     "${gatekeeper.security.mtls.enabled:false}") boolean mtlsEnabled) {
         this.mtlsEnabled = mtlsEnabled;
@@ -95,11 +112,17 @@ public class VerificationService {
         this.yubicoVerifier = yubicoVerifier;
         this.azureVerifier = azureVerifier;
         this.googleVerifier = googleVerifier;
+        this.marvellVerifier = marvellVerifier;
+        this.thalesVerifier = thalesVerifier;
+        this.crypto4aVerifier = crypto4aVerifier;
+        this.fortanixVerifier = fortanixVerifier;
+        this.nshieldVerifier = nshieldVerifier;
         this.approvalRegistry = approvalRegistry;
         this.receiptSigner = receiptSigner;
         this.issuerCaValidator = issuerCaValidator;
         this.auditLog = auditLog;
         this.principalResolver = principalResolver;
+        this.keyPolicy = keyPolicy;
     }
 
     /**
@@ -153,13 +176,20 @@ public class VerificationService {
 
         String publicKeyFingerprint = fingerprint(publicKey);
 
+        // A key outside the policy is NON-COMPLIANT whatever its attestation
+        // shows; the attestation is still verified so the receipt reports it.
+        String keyViolation = keyPolicy.violation(publicKey).orElse(null);
+        if (keyViolation != null) {
+            errors.add("KEY_NOT_ALLOWED: " + keyViolation);
+        }
+
         // Determine vendor
         HsmVendor vendor;
         try {
             vendor = HsmVendor.valueOf(request.getHsmVendor().toUpperCase());
         } catch (Exception e) {
             errors.add("Unsupported or invalid HSM vendor: " + request.getHsmVendor()
-                    + ". Supported: YUBICO, SECUROSYS, AZURE, GOOGLE");
+                    + ". Supported: YUBICO, SECUROSYS, AZURE, GOOGLE, MARVELL, THALES, CRYPTO4A, FORTANIX, ENTRUST");
             return buildNonCompliantResponse(errors, warnings, timestamp, request, operationLabel);
         }
 
@@ -194,8 +224,11 @@ public class VerificationService {
                 publicKeyMatch = result.isPublicKeyMatch();
                 attestationChainValid = result.isChainValid();
                 attestationSignatureValid = result.isSignatureValid();
+                // Origin comes from the attestation's creation attribute; the
+                // never_extractable/always_sensitive flags are not origin
+                // attributes and no longer stand in for it.
                 generatedOnDevice = result.isSignatureValid()
-                        && result.isNeverExtractable() && result.isAlwaysSensitive();
+                        && "generated".equals(result.getKeyOrigin());
                 exportable = result.isExtractable();
                 hsmModel = "Primus HSM";
                 hsmSerial = result.getHsmSerialNumber();
@@ -261,6 +294,97 @@ public class VerificationService {
                     errors.addAll(result.getErrors());
                 }
             }
+            case MARVELL -> {
+                if (request.getAttestationData() == null || request.getAttestationData().isBlank()) {
+                    errors.add("attestationData (base64 of attest.dat) is required for Marvell LiquidSecurity verification");
+                    break;
+                }
+                var result = marvellVerifier.verifyMarvellAttestation(
+                        request.getAttestationData(),
+                        request.getAttestationCertChain(),
+                        publicKey);
+                publicKeyMatch = result.isPublicKeyMatch();
+                attestationChainValid = result.isChainValid();
+                attestationSignatureValid = result.isSignatureValid();
+                generatedOnDevice = "generated".equals(result.getKeyOrigin());
+                exportable = result.isExtractable();
+                hsmModel = "Marvell LiquidSecurity";
+                hsmSerial = result.getPartitionSerial();
+                if (!result.isValid()) {
+                    errors.addAll(result.getErrors());
+                }
+            }
+            case THALES -> {
+                if (request.getAttestationData() == null || request.getAttestationData().isBlank()) {
+                    errors.add("attestationData (base64 of the PKC from cmu getpkc) is required for Thales Luna verification");
+                    break;
+                }
+                var result = thalesVerifier.verifyLunaAttestation(request.getAttestationData(), publicKey);
+                publicKeyMatch = result.isPublicKeyMatch();
+                attestationChainValid = result.isChainValid();
+                // The PKC is the HSM's signed statement: its chain signatures are the attestation signature.
+                attestationSignatureValid = result.isChainValid();
+                generatedOnDevice = "generated".equals(result.getKeyOrigin());
+                exportable = result.isExportable();
+                hsmModel = "Thales Luna";
+                hsmSerial = result.getHsmSerial();
+                if (!result.isValid()) {
+                    errors.addAll(result.getErrors());
+                }
+            }
+            case CRYPTO4A -> {
+                if (request.getAttestationData() == null || request.getAttestationData().isBlank()) {
+                    errors.add("attestationData (the QASM attestation message, base64 or PEM) is required for Crypto4A verification");
+                    break;
+                }
+                var result = crypto4aVerifier.verifyCrypto4AAttestation(request.getAttestationData(), publicKey);
+                publicKeyMatch = result.isPublicKeyMatch();
+                attestationChainValid = result.isChainValid();
+                attestationSignatureValid = result.isSignatureValid();
+                generatedOnDevice = "generated".equals(result.getKeyOrigin());
+                exportable = result.isExportable();
+                hsmModel = "Crypto4A QASM";
+                hsmSerial = result.getHsmSerial();
+                if (!result.isValid()) {
+                    errors.addAll(result.getErrors());
+                }
+            }
+            case FORTANIX -> {
+                if (request.getAttestationData() == null || request.getAttestationData().isBlank()) {
+                    errors.add("attestationData (the DSM key attestation JSON) is required for Fortanix verification");
+                    break;
+                }
+                var result = fortanixVerifier.verifyFortanixAttestation(request.getAttestationData(), publicKey);
+                publicKeyMatch = result.isPublicKeyMatch();
+                attestationChainValid = result.isChainValid();
+                attestationSignatureValid = result.isSignatureValid();
+                generatedOnDevice = "generated".equals(result.getKeyOrigin());
+                exportable = result.isExportable();
+                hsmModel = "Fortanix DSM";
+                hsmSerial = result.getKeyId();
+                if (!result.isValid()) {
+                    errors.addAll(result.getErrors());
+                }
+            }
+            case ENTRUST -> {
+                if (request.getAttestationData() == null || request.getAttestationData().isBlank()) {
+                    errors.add("attestationData (the nShield key attestation bundle JSON) is required for Entrust verification");
+                    break;
+                }
+                var result = nshieldVerifier.verifyNShieldAttestation(request.getAttestationData(), publicKey);
+                publicKeyMatch = result.isPublicKeyMatch();
+                attestationChainValid = result.isChainValid();
+                // The warrant, module state, world binding and key generation
+                // signatures are all part of the chain.
+                attestationSignatureValid = result.isChainValid();
+                generatedOnDevice = "generated".equals(result.getKeyOrigin());
+                exportable = result.isExportable();
+                hsmModel = "Entrust nShield";
+                hsmSerial = result.getEsn();
+                if (!result.isValid()) {
+                    errors.addAll(result.getErrors());
+                }
+            }
         }
 
         // Determine compliance
@@ -270,7 +394,7 @@ public class VerificationService {
         // Build DORA compliance mapping
         DoraCompliance doraCompliance = buildDoraCompliance(
                 compliant, publicKeyMatch, attestationChainValid, attestationSignatureValid,
-                generatedOnDevice, exportable);
+                generatedOnDevice, exportable, keyViolation);
 
         // Key properties
         KeyProperties keyProperties = KeyProperties.builder()
@@ -302,7 +426,7 @@ public class VerificationService {
         // bound to the entry so that only the same client can confirm it.
         approvalRegistry.register(
                 verificationId, confirmationNonce, compliant, publicKeyFingerprint,
-                request.getSupplierIdentifier(), request.getSupplierName(),
+                parties(request), request,
                 compliant ? vendor.getVendorName() : null,
                 compliant ? hsmModel : null,
                 request.getCountryCode(),
@@ -321,7 +445,10 @@ public class VerificationService {
                 .hsmSerialNumber(compliant ? hsmSerial : null)
                 .keyProperties(keyProperties)
                 .doraCompliance(doraCompliance)
+                .customerOrganisationNumber(request.getCustomerOrganisationNumber())
+                .customerSwishNumber(request.getCustomerSwishNumber())
                 .supplierIdentifier(request.getSupplierIdentifier())
+                .supplierNumber(request.getSupplierNumber())
                 .supplierName(request.getSupplierName())
                 .keyPurpose(request.getKeyPurpose())
                 .countryCode(request.getCountryCode())
@@ -386,7 +513,8 @@ public class VerificationService {
     }
 
     private DoraCompliance buildDoraCompliance(boolean compliant, boolean publicKeyMatch,
-            boolean chainValid, boolean signatureValid, boolean generatedOnDevice, boolean exportable) {
+            boolean chainValid, boolean signatureValid, boolean generatedOnDevice, boolean exportable,
+            String keyViolation) {
 
         // Article 5(2)(b): High standards for authenticity and integrity
         // Cannot be maintained without verified HSM protection
@@ -400,11 +528,14 @@ public class VerificationService {
         // Verb is "prevent" — requires active measure, not passive contractual term
         boolean art9_3c = signatureValid && chainValid && publicKeyMatch && !exportable;
 
-        // Article 9(3)(d): Protection against poor administration,
-        // processing-related risks and the human factor
+        // Article 9(3)(d): "ensure that data is protected from risks arising from
+        // data management, including poor administration, processing-related
+        // risks and human error"
         boolean art9_3d = signatureValid && chainValid && generatedOnDevice && !exportable;
 
-        // Article 9(4)(d): Strong authentication mechanisms with dedicated control systems
+        // Article 9(4)(d): "policies and protocols for strong authentication
+        // mechanisms, based on relevant standards and dedicated control systems,
+        // and protection measures of cryptographic keys"
         boolean art9_4d = signatureValid && chainValid && publicKeyMatch && generatedOnDevice && !exportable;
 
         // Article 28(1)(a): Full responsibility at all times regardless of
@@ -416,6 +547,12 @@ public class VerificationService {
             summary = "Signing key is cryptographically proven to be generated and stored in a certified HSM "
                     + "with non-exportable attribute. All DORA requirements for cryptographic key management "
                     + "are independently verifiable.";
+        } else if (keyViolation != null && signatureValid && chainValid && publicKeyMatch && generatedOnDevice
+                && !exportable) {
+            // The articles above describe the attestation; the key itself is
+            // outside the scheme's key policy.
+            summary = "Non-compliant: " + keyViolation + ". The attestation evidence verified, but the "
+                    + "key is not one the scheme accepts.";
         } else {
             List<String> failures = new ArrayList<>();
             if (!chainValid)
@@ -428,6 +565,8 @@ public class VerificationService {
                 failures.add("key not generated on device");
             if (exportable)
                 failures.add("key is exportable");
+            if (keyViolation != null)
+                failures.add(keyViolation);
 
             summary = "Non-compliant: " + String.join(", ", failures) + ". "
                     + "The absence of valid attestation means the financial entity cannot demonstrate compliance "
@@ -490,15 +629,7 @@ public class VerificationService {
     }
 
     private String fingerprint(PublicKey key) {
-        try {
-            return Fingerprints.ofPublicKey(key);
-        } catch (Exception e) {
-            // SHA-256 is mandatory in every JRE (JCA guarantee), so this branch
-            // should be unreachable. If it ever fires we want a loud signal
-            // rather than a silent "error" string propagated into a receipt.
-            log.error("Unexpected SHA-256 fingerprint failure", e);
-            return "error";
-        }
+        return Fingerprints.ofPublicKey(key);
     }
 
     private VerificationResponse buildNonCompliantResponse(List<String> errors,
@@ -511,7 +642,7 @@ public class VerificationService {
         // Register non-compliant result in approval registry
         approvalRegistry.register(
                 verificationId, confirmationNonce, false, null,
-                request.getSupplierIdentifier(), request.getSupplierName(),
+                parties(request), request,
                 null, null, request.getCountryCode(),
                 principalResolver.currentPrincipal());
 
@@ -535,7 +666,10 @@ public class VerificationService {
                         .article28_1a(false)
                         .summary("Verification could not be completed. " + String.join("; ", errors))
                         .build())
+                .customerOrganisationNumber(request.getCustomerOrganisationNumber())
+                .customerSwishNumber(request.getCustomerSwishNumber())
                 .supplierIdentifier(request.getSupplierIdentifier())
+                .supplierNumber(request.getSupplierNumber())
                 .supplierName(request.getSupplierName())
                 .keyPurpose(request.getKeyPurpose())
                 .countryCode(request.getCountryCode())
@@ -560,8 +694,10 @@ public class VerificationService {
      * eu.gillstrom.gatekeeper.audit.AuditLogException}.
      *
      * <p>The request digest is taken over a deterministic "request fingerprint"
-     * built from the supplier identifier, public-key PEM, vendor and the
-     * country code. Storing only a digest (rather than the full payload)
+     * built from the country code, the customer's organisation and Swish
+     * numbers, the supplier identifier, number and name, vendor, key
+     * purpose, public-key PEM, attestation data and signature, and every
+     * certificate of the attestation chain. Storing only a digest (rather than the full payload)
      * keeps the audit log compact while still letting a supervisor verify
      * "this was the request" given the original payload — the receipt
      * itself is the authoritative record.</p>
@@ -584,19 +720,16 @@ public class VerificationService {
 
     /**
      * Append-only audit witness for a Step 7 confirmation. The receipt
-     * digest is {@code null} because confirm responses are not signed
-     * receipts — the authoritative artefact for Step 7 is the registry
-     * transition, not a receipt. Compliance for the audit row is the
-     * conjunction "loop closed AND public-key match (when issued) AND
-     * no anomalies", reflecting the supervisor's view of "did this
-     * confirmation pass?".
+     * digest is {@code null}: the authoritative artefact for Step 7 is the
+     * registry transition, not a receipt. Compliance for the audit row is
+     * "loop closed", which every response sets exactly when there are no
+     * anomalies; a failed public-key match on an issued certificate always
+     * adds one, so it needs no separate term.
      */
     private void appendConfirmAuditEntry(IssuanceConfirmation confirmation,
                                          IssuanceConfirmationResponse response) {
         String requestDigestB64 = sha256Base64(canonicalConfirmationBytes(confirmation));
-        boolean confirmCompliant = response.isLoopClosed()
-                && (response.getAnomalies() == null || response.getAnomalies().isEmpty())
-                && (response.getPublicKeyMatch() == null || response.getPublicKeyMatch());
+        boolean confirmCompliant = response.isLoopClosed();
         AuditAppendRequest req = new AuditAppendRequest(
                 principalResolver.currentPrincipal(),
                 "CONFIRM",
@@ -607,11 +740,28 @@ public class VerificationService {
         auditLog.append(req);
     }
 
+    private static ApprovalRegistry.Parties parties(VerificationRequest r) {
+        return new ApprovalRegistry.Parties(r.getCustomerOrganisationNumber(), r.getCustomerSwishNumber(),
+                r.getSupplierIdentifier(), r.getSupplierNumber(), r.getSupplierName());
+    }
+
+    /**
+     * Base64 SHA-256 of the canonical request bytes: the {@code requestDigestBase64}
+     * of the request's audit entry. Recomputing it from a registry entry's
+     * {@code submission} shows that the stored evidence is what was verified.
+     */
+    public static String requestDigestBase64(VerificationRequest r) {
+        return sha256Base64(canonicalRequestBytes(r));
+    }
+
     private static byte[] canonicalRequestBytes(VerificationRequest r) {
         StringBuilder sb = new StringBuilder(256);
-        sb.append("v1|verify|")
+        sb.append("v2|verify|")
           .append(safeNull(r.getCountryCode())).append('|')
+          .append(safeNull(r.getCustomerOrganisationNumber())).append('|')
+          .append(safeNull(r.getCustomerSwishNumber())).append('|')
           .append(safeNull(r.getSupplierIdentifier())).append('|')
+          .append(safeNull(r.getSupplierNumber())).append('|')
           .append(safeNull(r.getSupplierName())).append('|')
           .append(safeNull(r.getHsmVendor())).append('|')
           .append(safeNull(r.getKeyPurpose())).append('|')
@@ -716,6 +866,7 @@ public class VerificationService {
                     .processedTimestamp(processedTimestamp.toString())
                     .anomalies(anomalies)
                     .build();
+            receiptSigner.signInto(unknownResp);
             // Audit-log the anomaly so a supervisor can detect "fake
             // confirmations" that reference unknown verification IDs.
             appendConfirmAuditEntry(confirmation, unknownResp);
@@ -799,16 +950,20 @@ public class VerificationService {
                     publicKeyMatch,
                     issuedCertificate);
         } catch (ApprovalRegistry.NonceMismatchException e) {
+            // Answered like every other confirmation: signed, so the financial
+            // entity can tell the gatekeeper's refusal from anyone else's.
             anomalies.add("ANOMALY: Confirmation nonce does not match the nonce bound to "
                     + "verificationId at verify time. Possible Step-7 replay attempt.");
-            appendConfirmAuditEntry(confirmation, IssuanceConfirmationResponse.builder()
+            IssuanceConfirmationResponse rejection = IssuanceConfirmationResponse.builder()
                     .verificationId(confirmation.getVerificationId())
                     .loopClosed(false)
                     .registryStatus(IssuanceConfirmationResponse.RegistryStatus.ANOMALY_NONCE_MISMATCH)
                     .processedTimestamp(processedTimestamp.toString())
                     .anomalies(anomalies)
-                    .build());
-            throw e;
+                    .build();
+            receiptSigner.signInto(rejection);
+            appendConfirmAuditEntry(confirmation, rejection);
+            return rejection;
         }
 
         // Determine final status
@@ -835,6 +990,10 @@ public class VerificationService {
                 .processedTimestamp(processedTimestamp.toString())
                 .anomalies(anomalies)
                 .build();
+
+        // Signed with the receipt key: an unsigned response let anyone able to
+        // answer the confirm call report the loop as closed.
+        receiptSigner.signInto(resp);
 
         // Append a CONFIRM audit entry. The audit-log compliance bit
         // captures "loop closed AND no anomalies" so a supervisor can
@@ -898,28 +1057,5 @@ public class VerificationService {
             throw new IllegalArgumentException("No X.509 certificate in signingCertificatePem");
         }
         return certificates;
-    }
-
-    /**
-     * Legacy helper kept only for binary compatibility in case any external
-     * caller still references the PEMParser-based path; internal flow now
-     * uses {@link #parseX509Certificates(String)} so the parsed certificates
-     * can also be PKIX-validated against the issuer CA trust anchors.
-     */
-    @SuppressWarnings("unused")
-    private PublicKey extractPublicKeyFromCertificate(String certificatePem) throws Exception {
-        try (PEMParser parser = new PEMParser(new StringReader(certificatePem))) {
-            Object parsed = parser.readObject();
-            if (parsed instanceof org.bouncycastle.cert.X509CertificateHolder holder) {
-                byte[] encoded = holder.getSubjectPublicKeyInfo().getEncoded();
-                X509EncodedKeySpec keySpec = new X509EncodedKeySpec(encoded);
-                try {
-                    return KeyFactory.getInstance("RSA").generatePublic(keySpec);
-                } catch (Exception e) {
-                    return KeyFactory.getInstance("EC").generatePublic(keySpec);
-                }
-            }
-            throw new IllegalArgumentException("Could not parse X.509 certificate from PEM");
-        }
     }
 }

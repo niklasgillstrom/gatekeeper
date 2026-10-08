@@ -75,7 +75,7 @@ class SignatureVerificationControllerTest {
 
     @Test
     void verifyEndpointReturns200WithCompliantTrueWhenAllChecksPass() throws Exception {
-        registry.put(publicKeyFingerprint, ApprovalRegistry.RegistryEntry.builder()
+        registry.put(signingCert, ApprovalRegistry.RegistryEntry.builder()
                 .verificationId("VID-OK")
                 .compliant(true)
                 .status(RegistryStatus.VERIFIED_AND_ISSUED)
@@ -102,14 +102,15 @@ class SignatureVerificationControllerTest {
                         .contentType("application/json")
                         .content(json.writeValueAsString(request)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.signatureValid").value(true))
+                // Looked up before the signature is checked (see SignatureVerificationService).
+                .andExpect(jsonPath("$.signatureValid").value(false))
                 .andExpect(jsonPath("$.compliant").value(false))
                 .andExpect(jsonPath("$.reason").value("CERT_NOT_FOUND"));
     }
 
     @Test
     void verifyEndpointReturns200WithSignatureInvalidWhenSignatureDoesNotMatch() throws Exception {
-        registry.put(publicKeyFingerprint, ApprovalRegistry.RegistryEntry.builder()
+        registry.put(signingCert, ApprovalRegistry.RegistryEntry.builder()
                 .verificationId("VID-OK")
                 .compliant(true)
                 .status(RegistryStatus.VERIFIED_AND_ISSUED)
@@ -136,7 +137,7 @@ class SignatureVerificationControllerTest {
         // Verifies the data-minimisation contract: the request must be
         // parseable and processable without ever including transaction
         // payload content, only the digest.
-        registry.put(publicKeyFingerprint, ApprovalRegistry.RegistryEntry.builder()
+        registry.put(signingCert, ApprovalRegistry.RegistryEntry.builder()
                 .verificationId("VID-DM")
                 .compliant(true)
                 .status(RegistryStatus.VERIFIED_AND_ISSUED)
@@ -160,7 +161,7 @@ class SignatureVerificationControllerTest {
 
     @Test
     void verifyEndpointAppendsAnAuditEntryForEverySettlementQuery() throws Exception {
-        registry.put(publicKeyFingerprint, ApprovalRegistry.RegistryEntry.builder()
+        registry.put(signingCert, ApprovalRegistry.RegistryEntry.builder()
                 .verificationId("VID-AUDIT")
                 .compliant(true)
                 .status(RegistryStatus.VERIFIED_AND_ISSUED)
@@ -213,20 +214,40 @@ class SignatureVerificationControllerTest {
     }
 
     /**
-     * Minimal ApprovalRegistry stand-in. Indexes entries by
-     * publicKeyFingerprint only — the registry behaviours not exercised by
-     * the verify endpoint are deliberately unimplemented.
+     * Minimal ApprovalRegistry stand-in. Finds entries by the issued
+     * certificate's serial and issuer, as settlement-time lookup does; the
+     * registry behaviours not exercised by the verify endpoint are
+     * deliberately unimplemented.
      */
     private static class FakeApprovalRegistry implements ApprovalRegistry {
-        private final java.util.Map<String, RegistryEntry> byFingerprint = new java.util.HashMap<>();
+        private final java.util.List<RegistryEntry> entries = new java.util.ArrayList<>();
 
-        void put(String fingerprint, RegistryEntry entry) {
-            byFingerprint.put(fingerprint, entry);
+        /** An entry whose confirmation stored {@code cert} as the issued certificate. */
+        void put(X509Certificate cert, RegistryEntry entry) {
+            storeIssued(entry, cert);
+            entries.add(entry);
         }
 
         @Override
-        public Optional<RegistryEntry> findByPublicKeyFingerprint(String fingerprint) {
-            return Optional.ofNullable(byFingerprint.get(fingerprint));
+        public Optional<RegistryEntry> findByIssuedCertificate(java.math.BigInteger serial,
+                javax.security.auth.x500.X500Principal issuer) {
+            return entries.stream()
+                    .filter(e -> e.getIssuedCertificateSerial() != null
+                            && serial.equals(new java.math.BigInteger(e.getIssuedCertificateSerial(), 16))
+                            && issuer.equals(new javax.security.auth.x500.X500Principal(
+                                    e.getIssuedCertificateIssuerDn())))
+                    .findFirst();
+        }
+
+        /** Records {@code cert} as the certificate stored at confirmation, as the real registries do. */
+        private static void storeIssued(RegistryEntry entry, X509Certificate cert) {
+            try {
+                entry.setIssuedCertificatePem(TestPki.toPem(cert));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            entry.setIssuedCertificateSerial(cert.getSerialNumber().toString(16));
+            entry.setIssuedCertificateIssuerDn(cert.getIssuerX500Principal().getName());
         }
 
         @Override

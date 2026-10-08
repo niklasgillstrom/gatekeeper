@@ -113,7 +113,7 @@ public class EphemeralReceiptSigner implements ReceiptSigner {
         // Ephemeral certs are valid for 24h — long enough for a dev session,
         // short enough that a process restart visibly rotates the key.
         Date notAfter = new Date(now + 24L * 60L * 60L * 1000L);
-        BigInteger serial = BigInteger.valueOf(now).xor(BigInteger.valueOf(kp.hashCode() & 0xFFFFFFFFL));
+        BigInteger serial = new BigInteger(63, new SecureRandom()).add(BigInteger.ONE); // positive, at most 8 bytes
 
         X500Name subject = new X500Name("CN=REFERENCE-EPHEMERAL,O=gatekeeper (reference)");
 

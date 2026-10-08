@@ -20,11 +20,13 @@ import lombok.NoArgsConstructor;
  * <ul>
  *   <li>{@code OK} — verification passed</li>
  *   <li>{@code CERT_NOT_FOUND} — no certificate stored at Step 7 for
- *       {@code (certSerial, issuerDn)}, or no registry entry for the
- *       certificate's public key</li>
+ *       {@code (certSerial, issuerDn)}, or a supplied certificate that
+ *       differs from the stored one</li>
  *   <li>{@code SIGNATURE_INVALID} — cryptographic verification failed</li>
  *   <li>{@code CERT_NON_COMPLIANT} — cert exists but did not pass
  *       structural compliance at issuance</li>
+ *   <li>{@code CERT_EXPIRED} — the signature verifies, but the certificate
+ *       is outside its validity period</li>
  *   <li>{@code MALFORMED_INPUT} — request fields could not be parsed</li>
  *   <li>{@code ALGORITHM_NOT_SUPPORTED} — algorithm parameter unrecognised</li>
  * </ul>

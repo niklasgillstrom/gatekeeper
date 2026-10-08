@@ -191,13 +191,47 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
                                   String hsmModel,
                                   String countryCode,
                                   String verificationPrincipal) {
+        return register(verificationId, confirmationNonce, compliant, publicKeyFingerprint,
+                Parties.supplierOnly(supplierIdentifier, supplierName), hsmVendor, hsmModel,
+                countryCode, verificationPrincipal);
+    }
+
+    @Override
+    public RegistryEntry register(String verificationId,
+                                  String confirmationNonce,
+                                  boolean compliant,
+                                  String publicKeyFingerprint,
+                                  Parties parties,
+                                  String hsmVendor,
+                                  String hsmModel,
+                                  String countryCode,
+                                  String verificationPrincipal) {
+        return register(verificationId, confirmationNonce, compliant, publicKeyFingerprint, parties, null,
+                hsmVendor, hsmModel, countryCode, verificationPrincipal);
+    }
+
+    @Override
+    public RegistryEntry register(String verificationId,
+                                  String confirmationNonce,
+                                  boolean compliant,
+                                  String publicKeyFingerprint,
+                                  Parties parties,
+                                  eu.gillstrom.gatekeeper.model.VerificationRequest submission,
+                                  String hsmVendor,
+                                  String hsmModel,
+                                  String countryCode,
+                                  String verificationPrincipal) {
         RegistryEntry entry = RegistryEntry.builder()
+                .submission(submission)
                 .verificationId(verificationId)
                 .confirmationNonce(confirmationNonce)
                 .compliant(compliant)
                 .publicKeyFingerprint(publicKeyFingerprint)
-                .supplierIdentifier(supplierIdentifier)
-                .supplierName(supplierName)
+                .customerOrganisationNumber(parties.customerOrganisationNumber())
+                .customerSwishNumber(parties.customerSwishNumber())
+                .supplierIdentifier(parties.supplierIdentifier())
+                .supplierNumber(parties.supplierNumber())
+                .supplierName(parties.supplierName())
                 .hsmVendor(hsmVendor)
                 .hsmModel(hsmModel)
                 .countryCode(countryCode)
@@ -332,9 +366,9 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
         } else if (!entry.isCompliant() && issued) {
             entry.setStatus(RegistryStatus.ANOMALY_ISSUED_DESPITE_REJECTION);
             entry.setActualPublicKeyFingerprint(actualPublicKeyFingerprint);
-        } else {
-            entry.setStatus(RegistryStatus.REJECTED_NOT_ISSUED);
         }
+        // Neither compliant nor issued: the entry keeps the REJECTED_NOT_ISSUED
+        // it was registered with, and confirm is single-use, so nothing changed it.
     }
 
     private static IssuedCertificate issuedCertificateFrom(JsonNode op) {

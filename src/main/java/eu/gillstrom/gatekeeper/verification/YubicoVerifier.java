@@ -24,6 +24,11 @@ import java.util.Set;
 @Component
 public class YubicoVerifier implements HsmAttestationVerifier {
 
+    /** Text before the first '(' contains no ')', then the serial up to the first ')'. */
+    private static final java.util.regex.Pattern DEVICE_SERIAL =
+            java.util.regex.Pattern.compile("^[^()]+\\(([^)]*)\\)");
+
+
     private static final Logger log = LoggerFactory.getLogger(YubicoVerifier.class);
 
     // Yubico YubiHSM Root CA — genuine vendor-issued root.
@@ -161,11 +166,11 @@ public class YubicoVerifier implements HsmAttestationVerifier {
             if (chain.length > 1) {
                 String cn = chain[1].getSubjectX500Principal().getName();
                 if (cn.contains("Attestation")) {
-                    // Format: YubiHSM Attestation (XXXXXXXX)
-                    int start = cn.indexOf('(');
-                    int end = cn.indexOf(')');
-                    if (start > 0 && end > start) {
-                        result.setDeviceSerial(cn.substring(start + 1, end));
+                    // Format: YubiHSM Attestation (XXXXXXXX): the text between the
+                    // first '(' and the first ')', when a ')' does not come first.
+                    java.util.regex.Matcher serial = DEVICE_SERIAL.matcher(cn);
+                    if (serial.find()) {
+                        result.setDeviceSerial(serial.group(1));
                     }
                 }
             }
@@ -239,7 +244,20 @@ public class YubicoVerifier implements HsmAttestationVerifier {
 
     private void extractYubicoAttributes(X509Certificate cert, YubicoAttestationResult result) {
         try {
-            for (String oid : cert.getNonCriticalExtensionOIDs()) {
+            // Read both critical and non-critical extension OIDs. Yubico ships
+            // the attestation extensions as non-critical, but a certificate
+            // that marks them critical was previously skipped entirely, and a
+            // skipped capabilities extension left exportability reported as
+            // "not exportable" without anything having been parsed.
+            java.util.Set<String> oids = new java.util.LinkedHashSet<>();
+            if (cert.getCriticalExtensionOIDs() != null) {
+                oids.addAll(cert.getCriticalExtensionOIDs());
+            }
+            if (cert.getNonCriticalExtensionOIDs() != null) {
+                oids.addAll(cert.getNonCriticalExtensionOIDs());
+            }
+            boolean capabilitiesSeen = false;
+            for (String oid : oids) {
                 byte[] extValue = cert.getExtensionValue(oid);
                 if (extValue == null)
                     continue;
@@ -265,6 +283,7 @@ public class YubicoVerifier implements HsmAttestationVerifier {
                         applyOrigin(bs.getBytes(), result);
                     }
                     case CAPABILITIES_OID -> {
+                        capabilitiesSeen = true;
                         ASN1BitString bs = ASN1BitString.getInstance(content);
                         applyCapabilities(bs.getBytes(), result);
                     }
@@ -279,6 +298,12 @@ public class YubicoVerifier implements HsmAttestationVerifier {
                 }
             }
 
+            // Fail closed on a missing capabilities extension: an absent
+            // attestation attribute is not evidence that it is satisfied.
+            if (!capabilitiesSeen) {
+                result.addError("YUBICO_CAPABILITIES_MISSING: Capabilities attestation extension missing ("
+                        + CAPABILITIES_OID + ") — key exportability is unverified");
+            }
             validateKeyAttributes(result);
 
         } catch (Exception e) {
@@ -324,15 +349,10 @@ public class YubicoVerifier implements HsmAttestationVerifier {
     public boolean verifyChain(X509Certificate attestationCert, X509Certificate[] chain) {
         if (chain == null || chain.length == 0)
             return false;
-        try {
-            X509Certificate[] fullChain = new X509Certificate[chain.length + 1];
-            fullChain[0] = attestationCert;
-            System.arraycopy(chain, 0, fullChain, 1, chain.length);
-            return verifyCertChainToRoot(fullChain);
-        } catch (Exception e) {
-            log.warn("Yubico verifyChain failed: {}", e.getMessage());
-            return false;
-        }
+        X509Certificate[] fullChain = new X509Certificate[chain.length + 1];
+        fullChain[0] = attestationCert;
+        System.arraycopy(chain, 0, fullChain, 1, chain.length);
+        return verifyCertChainToRoot(fullChain);
     }
 
     @Override

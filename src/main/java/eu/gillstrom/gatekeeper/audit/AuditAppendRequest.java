@@ -8,9 +8,11 @@ import java.util.Objects;
  * <p>Field semantics:</p>
  * <ul>
  *   <li>{@code mtlsClientPrincipal} — the authenticated identity of the API
- *       caller. In production this is the CN (or full DN) extracted from
- *       the mTLS client certificate. The value {@code "anonymous"} is used
- *       when the open (non-mTLS) reference filter chain is in use.</li>
+ *       caller. With mTLS this is the value of the subject attribute named by
+ *       {@code gatekeeper.security.mtls.principal-attribute} (by default
+ *       CN). The open (non-mTLS) reference filter chain records
+ *       {@code "reference-anonymous"}; {@code "anonymous"} is recorded only
+ *       when no security context exists at all (unit tests).</li>
  *   <li>{@code operation} — one of {@code VERIFY}, {@code CONFIRM},
  *       {@code BATCH_VERIFY} (issuance-time, {@code VerificationService})
  *       or {@code SETTLEMENT_VERIFY} (settlement-time,

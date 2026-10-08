@@ -6,8 +6,6 @@
 ## reference default:
 ##   - mTLS enforced on all /v1/attestation/** endpoints
 ##   - ReceiptSigner bound to a configured PKCS#12 keystore
-##   - Signatory-rights registry wired to mock-registry (replace with real
-##     Bolagsverket / Swish agreement-registry adapter for production)
 
 server:
   port: 8443
@@ -53,7 +51,9 @@ gatekeeper:
   security:
     mtls:
       enabled: true
-      # Principal extractor regex.
+      # Subject attribute of the client certificate used as the request
+      # principal: its exact value, read from the encoded name. A subject in
+      # which the attribute is missing or repeated is not authenticated.
       #
       # Swedish Expisoft-issued organisationscertifikat (the standard
       # client-cert format used by Finansinspektionen and Swedish FEs)
@@ -61,14 +61,14 @@ gatekeeper:
       # not the CN. For those certs, prefer SERIALNUMBER as the
       # principal because it is a stable unique identifier:
       #
-      #   principal-regex: "SERIALNUMBER=(.*?)(?:,|$)"
+      #   principal-attribute: SERIALNUMBER
       #
-      # The default below extracts CN, which is what most non-Swedish
-      # NCAs would use. Swap to SERIALNUMBER (or 2.5.4.5, the OID form)
-      # when deploying against Swedish Expisoft client certs.
-      principal-regex: "CN=(.*?)(?:,|$)"
+      # The default below is CN, which is what most non-Swedish NCAs would
+      # use. (principal-regex was removed in 1.6.0; setting it now fails
+      # start-up.)
+      principal-attribute: CN
     roles:
-      # Map client-cert principals (extracted via principal-regex above) to
+      # Map client-cert principals (extracted via principal-attribute above) to
       # gatekeeper roles. First-match-wins. SUPERVISOR has full access; FE is
       # limited to verify/confirm.
       #
@@ -77,13 +77,13 @@ gatekeeper:
       # real Swedish deployment overrides them with patterns matching the
       # NCA's actual client-cert PKI. Two realistic patterns:
       #
-      #   When principal-regex extracts SERIALNUMBER (org/myndighetsnr):
+      #   When principal-attribute is SERIALNUMBER (org/myndighetsnr):
       #     - cn-pattern: "^202100-4235$"          # Finansinspektionen
       #       roles: [SUPERVISOR]
       #     - cn-pattern: "^556[0-9]{4}-[0-9]{4}$" # any Swedish AB org-nr
       #       roles: [FE]
       #
-      #   When principal-regex extracts CN (organisation name):
+      #   When principal-attribute is CN (organisation name):
       #     - cn-pattern: "^Finansinspektionen$"
       #       roles: [SUPERVISOR]
       #     - cn-pattern: "^GetSwish AB$|^.* AB$"
@@ -97,6 +97,8 @@ gatekeeper:
           roles: [SUPERVISOR]
         - cn-pattern: "^FE-.*$|^GetSwish.*$|^.*-FE$"
           roles: [FE]
+        - cn-pattern: "^RAIL-.*$|^railgate-.*$"
+          roles: [SETTLEMENT_RAIL]
       # Empty default-roles = deny by default if no pattern matches. This
       # is the safe production posture; an unauthenticated client cert that
       # passes mTLS but doesn't match a role pattern can still reach public
@@ -154,12 +156,6 @@ gatekeeper:
     # via GET /v1/gatekeeper/keys.
     retired-keys: ${GATEKEEPER_RETIRED_KEYS:}
 
-swish:
-  signatory-rights:
-    # fail-closed (default) — refuses every signatory query
-    # mock-registry — demonstration registry from JSON config
-    # production adapter names will be added when wired
-    mode: fail-closed
 
 # OpenAPI document and Swagger UI are off in every non-dev profile. Neither has
 # a run-time function in this service, and the UI is a third-party JavaScript

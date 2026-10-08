@@ -13,7 +13,7 @@
 
     <groupId>eu.gillstrom</groupId>
     <artifactId>gatekeeper</artifactId>
-    <version>1.5.0</version>
+    <version>1.6.0</version>
     <name>DORA Attestation Gatekeeper</name>
     <description>
         NCA-operated gatekeeper API for HSM attestation verification at
@@ -106,6 +106,20 @@
              78383/78437/79677/86248/86350/87022.
              Remove this override when the parent manages >= 11.0.26. -->
         <tomcat.version>11.0.26</tomcat.version>
+        <!-- Spring Boot 4.1.1 manages Jackson 3.1.5 and 2.21.5. CVE-2026-83557
+             (deserialization of untrusted data) is listed as fixed in 3.1.6 and
+             2.21.6; 3.1.7 and 2.21.7 are the latest patch releases of those lines
+             (Maven Central, 2026-10-06). Remove when the parent manages them. -->
+        <jackson-bom.version>3.1.7</jackson-bom.version>
+        <jackson-2-bom.version>2.21.7</jackson-2-bom.version>
+        <!-- Spring Boot 4.1.1 manages 1.18.46; the annotation processor below is 1.18.48. -->
+        <lombok.version>1.18.48</lombok.version>
+        <!-- Reproducible builds: entries in the jar carry this time instead of
+             the build time, so the same commit builds to the same bytes. Set
+             it to the release date when cutting a release. -->
+        <project.build.outputTimestamp>2026-10-06T00:00:00Z</project.build.outputTimestamp>
+        <!-- PIT worker threads; override with -Dpit.threads=N on a larger machine. -->
+        <pit.threads>4</pit.threads>
     </properties>
 
     <dependencies>
@@ -127,7 +141,7 @@
         <dependency>
             <groupId>com.bucket4j</groupId>
             <artifactId>bucket4j_jdk17-core</artifactId>
-            <version>8.20.0</version>
+            <version>8.21.0</version>
         </dependency>
 
         <!-- OpenAPI / Swagger -->
@@ -142,7 +156,7 @@
         <dependency>
             <groupId>org.webjars</groupId>
             <artifactId>swagger-ui</artifactId>
-            <version>5.32.15</version>
+            <version>5.33.1</version>
         </dependency>
 
         <!-- BouncyCastle for certificate parsing and verification -->
@@ -232,49 +246,117 @@
                 </executions>
             </plugin>
 
-            <!--
-                OWASP Dependency-Check — continuous CVE scanning over all
-                project dependencies (and their transitives). Required for
-                ongoing operational hygiene of a supervisory artefact under
-                DORA Article 9 (ICT risk management) and Article 16
-                (vulnerability management). Failing the build on
-                CVSS >= 7.0 (HIGH/CRITICAL) is the operational baseline;
-                MEDIUM and LOW findings are reported but do not break the
-                build, so the operator can triage them via the suppression
-                file (.owasp-suppressions.xml in the repo root) when
-                appropriate.
-
-                First run downloads the NVD database (~150 MB, cached in
-                ~/.m2) unauthenticated; that is slow but works. To use an
-                NVD API key, pass it on the command line:
-                mvn -Dnvd.api.key=... org.owasp:dependency-check-maven:check
-                Do not wire it through <nvdApiKey>${env.X}</nvdApiKey> —
-                an unset variable becomes an empty key, which NVD rejects.
-                Pinned to 12.2.2: 13.0.0 cannot run without a key at all
-                (dependency-check/DependencyCheck#8715).
-            -->
-            <plugin>
-                <groupId>org.owasp</groupId>
-                <artifactId>dependency-check-maven</artifactId>
-                <version>12.2.2</version>
-                <configuration>
-                    <failBuildOnCVSS>7</failBuildOnCVSS>
-                    <formats>
-                        <format>HTML</format>
-                        <format>JSON</format>
-                    </formats>
-                    <suppressionFiles>
-                        <suppressionFile>${project.basedir}/.owasp-suppressions.xml</suppressionFile>
-                    </suppressionFiles>
-                </configuration>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>check</goal>
-                        </goals>
-                    </execution>
-                </executions>
-            </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+            OWASP Dependency-Check runs only with -Powasp (mvn -Powasp verify).
+            In the default build it downloaded the whole NVD database on every
+            clean machine, which is slow, needs network access and failed any
+            offline or sandboxed build, including one that only runs the tests.
+        -->
+        <profile>
+            <id>owasp</id>
+            <build>
+                <plugins>
+                    <!--
+                        OWASP Dependency-Check — continuous CVE scanning over all
+                        project dependencies (and their transitives). Required for
+                        ongoing operational hygiene of a supervisory artefact under
+                        DORA Article 9 (ICT risk management) and Article 16
+                        (vulnerability management). Failing the build on
+                        CVSS >= 7.0 (HIGH/CRITICAL) is the operational baseline;
+                        MEDIUM and LOW findings are reported but do not break the
+                        build, so the operator can triage them via the suppression
+                        file (.owasp-suppressions.xml in the repo root) when
+                        appropriate.
+        
+                        First run downloads the NVD database (~150 MB, cached in
+                        ~/.m2) unauthenticated; that is slow but works. To use an
+                        NVD API key, pass it on the command line:
+                        NVD_API_KEY=... mvn -Powasp verify -DnvdApiKeyEnvironmentVariable=NVD_API_KEY
+                        (the plugin reads the properties nvdApiKey and
+                        nvdApiKeyEnvironmentVariable, not nvd.api.key; the
+                        environment-variable form keeps the key out of debug logs)
+                        Do not wire it through <nvdApiKey>${env.X}</nvdApiKey> —
+                        an unset variable becomes an empty key, which NVD rejects.
+                        Pinned to 12.2.2: 13.0.0 cannot run without a key at all
+                        (dependency-check/DependencyCheck#8715).
+                    -->
+                    <plugin>
+                        <groupId>org.owasp</groupId>
+                        <artifactId>dependency-check-maven</artifactId>
+                        <version>12.2.2</version>
+                        <configuration>
+                            <failBuildOnCVSS>7</failBuildOnCVSS>
+                            <formats>
+                                <format>HTML</format>
+                                <format>JSON</format>
+                            </formats>
+                            <suppressionFiles>
+                                <suppressionFile>${project.basedir}/.owasp-suppressions.xml</suppressionFile>
+                            </suppressionFiles>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>check</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <!--
+                Mutation testing with PIT: mvn -Ppit test-compile org.pitest:pitest-maven:mutationCoverage
+                Reports are written to target/pit-reports/.
+            -->
+            <id>pit</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.pitest</groupId>
+                        <artifactId>pitest-maven</artifactId>
+                        <version>1.30.0</version>
+                        <dependencies>
+                            <dependency>
+                                <groupId>org.pitest</groupId>
+                                <artifactId>pitest-junit5-plugin</artifactId>
+                                <version>1.2.3</version>
+                            </dependency>
+                        </dependencies>
+                        <configuration>
+                            <targetClasses>
+                                <param>eu.gillstrom.gatekeeper.*</param>
+                            </targetClasses>
+                            <targetTests>
+                                <param>eu.gillstrom.gatekeeper.*</param>
+                            </targetTests>
+                            <threads>${pit.threads}</threads>
+                            <!-- Every mutant is detected in 1.6.0 (2,203 of 2,203; see PEER_REVIEW_GUIDE.md). -->
+                            <mutationThreshold>100</mutationThreshold>
+                            <!-- PIT's default logging packages, plus FileDescriptor: removing
+                                 the fsync after an audit or journal write cannot be observed
+                                 by a test, only by a power cut. -->
+                            <avoidCallsTo>
+                                <avoidCallsTo>java.util.logging</avoidCallsTo>
+                                <avoidCallsTo>org.apache.log4j</avoidCallsTo>
+                                <avoidCallsTo>org.slf4j</avoidCallsTo>
+                                <avoidCallsTo>org.apache.commons.logging</avoidCallsTo>
+                                <avoidCallsTo>java.io.FileDescriptor</avoidCallsTo>
+                            </avoidCallsTo>
+                            <timestampedReports>false</timestampedReports>
+                            <outputFormats>
+                                <param>HTML</param>
+                                <param>CSV</param>
+                            </outputFormats>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

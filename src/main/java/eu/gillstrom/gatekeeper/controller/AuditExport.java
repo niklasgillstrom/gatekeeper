@@ -73,7 +73,7 @@ public record AuditExport(
             List<AuditEntry> entries,
             String chainHeadHashAtExport,
             String signingKeyFingerprintHex) {
-        StringBuilder sb = new StringBuilder(256 + entries.size() * 70);
+        StringBuilder sb = new StringBuilder();
         sb.append("v1").append('|')
           .append(safe(inspectionId)).append('|')
           .append(generatedAt.toString()).append('|')

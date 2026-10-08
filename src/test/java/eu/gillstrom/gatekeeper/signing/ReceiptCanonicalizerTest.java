@@ -57,7 +57,7 @@ class ReceiptCanonicalizerTest {
         byte[] canonical = ReceiptCanonicalizer.canonicalize(sampleReceipt(true));
 
         String asString = new String(canonical, StandardCharsets.UTF_8);
-        assertThat(asString).startsWith("v2|");
+        assertThat(asString).startsWith("v3|");
         assertThat(canonical).isNotEmpty();
     }
 

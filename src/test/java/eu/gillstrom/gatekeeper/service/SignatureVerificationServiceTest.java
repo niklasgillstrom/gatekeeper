@@ -81,7 +81,7 @@ class SignatureVerificationServiceTest {
     @Test
     void allowsSettlementWhenSignatureValidAndCertCompliant() throws Exception {
         // Arrange: a compliant audit entry exists for this key.
-        registry.put(publicKeyFingerprint,
+        registry.put(signingCert,
                 buildEntry("VID-1", true, RegistryStatus.VERIFIED_AND_ISSUED));
 
         SignatureVerificationRequest request = signedRequest("payload-A");
@@ -100,7 +100,9 @@ class SignatureVerificationServiceTest {
 
         SignatureVerificationResponse response = service.verify(request);
 
-        assertThat(response.isSignatureValid()).isTrue();
+        // The certificate is looked up before the signature is checked: a
+        // signature under a certificate no issuance registered says nothing.
+        assertThat(response.isSignatureValid()).isFalse();
         assertThat(response.isCompliant()).isFalse();
         assertThat(response.getAuditEntryId()).isNull();
         assertThat(response.getReason()).isEqualTo("CERT_NOT_FOUND");
@@ -108,7 +110,7 @@ class SignatureVerificationServiceTest {
 
     @Test
     void deniesWhenCertExistsButIsNonCompliant() throws Exception {
-        registry.put(publicKeyFingerprint,
+        registry.put(signingCert,
                 buildEntry("VID-2", false, RegistryStatus.ANOMALY_PUBLIC_KEY_MISMATCH));
 
         SignatureVerificationRequest request = signedRequest("payload-C");
@@ -131,7 +133,7 @@ class SignatureVerificationServiceTest {
      */
     @Test
     void deniesWhenConfirmationRecordedAnAnomalyDespiteACompliantVerification() throws Exception {
-        registry.put(publicKeyFingerprint,
+        registry.put(signingCert,
                 buildEntry("VID-ANOMALY", true, RegistryStatus.ANOMALY_PUBLIC_KEY_MISMATCH));
 
         SignatureVerificationResponse response = service.verify(signedRequest("payload-M"));
@@ -147,7 +149,7 @@ class SignatureVerificationServiceTest {
 
     @Test
     void deniesWhenConfirmationRecordedIssuanceDespiteRejection() throws Exception {
-        registry.put(publicKeyFingerprint,
+        registry.put(signingCert,
                 buildEntry("VID-DESPITE", true, RegistryStatus.ANOMALY_ISSUED_DESPITE_REJECTION));
 
         SignatureVerificationResponse response = service.verify(signedRequest("payload-N"));
@@ -157,23 +159,24 @@ class SignatureVerificationServiceTest {
     }
 
     /**
-     * A verification awaiting Step 7 ({@code status == null}) is the ordinary
-     * state between issuance and confirmation and must keep settling — the
-     * fix above must not deny everything that has not been confirmed yet.
+     * A verification awaiting Step 7 has no issued certificate stored, so the
+     * certificate presented at settlement cannot be checked against anything.
+     * Until 1.6.0 such an entry settled; a self-signed certificate for a key
+     * that was verified but never issued was accepted.
      */
     @Test
-    void allowsSettlementWhileStillAwaitingConfirmation() throws Exception {
-        registry.put(publicKeyFingerprint, buildEntry("VID-AWAITING", true, null));
+    void deniesSettlementWhileStillAwaitingConfirmation() throws Exception {
+        registry.putWithoutCertificate(buildEntry("VID-AWAITING", true, null));
 
         SignatureVerificationResponse response = service.verify(signedRequest("payload-O"));
 
-        assertThat(response.isCompliant()).isTrue();
-        assertThat(response.getReason()).isEqualTo("OK");
+        assertThat(response.isCompliant()).isFalse();
+        assertThat(response.getReason()).isEqualTo("CERT_NOT_FOUND");
     }
 
     @Test
     void deniesWhenSignatureDoesNotMatchDigest() throws Exception {
-        registry.put(publicKeyFingerprint,
+        registry.put(signingCert,
                 buildEntry("VID-3", true, RegistryStatus.VERIFIED_AND_ISSUED));
 
         SignatureVerificationRequest request = signedRequest("payload-D");
@@ -204,7 +207,7 @@ class SignatureVerificationServiceTest {
 
     @Test
     void deniesAsCertNotFoundWhenSigningCertificatePemIsMissingAndNoCertificateIsStored() throws Exception {
-        registry.put(publicKeyFingerprint,
+        registry.putWithoutCertificate(
                 buildEntry("VID-NO-PEM", true, RegistryStatus.VERIFIED_AND_ISSUED));
         SignatureVerificationRequest request = signedRequest("payload-E2");
         request.setSigningCertificatePem(null);
@@ -218,7 +221,7 @@ class SignatureVerificationServiceTest {
 
     @Test
     void rsassaPssSignatureVerifiesWithSha512Mgf1AndA64ByteSalt() throws Exception {
-        registry.put(publicKeyFingerprint,
+        registry.put(signingCert,
                 buildEntry("VID-PSS", true, RegistryStatus.VERIFIED_AND_ISSUED));
         byte[] digest = MessageDigest.getInstance("SHA-512")
                 .digest("payload-PSS".getBytes(StandardCharsets.UTF_8));
@@ -256,7 +259,7 @@ class SignatureVerificationServiceTest {
 
     @Test
     void deniesWhenAlgorithmIsNotSupported() throws Exception {
-        registry.put(publicKeyFingerprint,
+        registry.put(signingCert,
                 buildEntry("VID-4", true, RegistryStatus.VERIFIED_AND_ISSUED));
         SignatureVerificationRequest request = signedRequest("payload-G");
         request.setAlgorithm("BOGUS-ALGORITHM");
@@ -269,22 +272,19 @@ class SignatureVerificationServiceTest {
     }
 
     @Test
-    void looksUpByActualPublicKeyFingerprintWhenPrimaryFingerprintDiffers() throws Exception {
-        // The registry may have been populated with a fingerprint different
-        // from the one we'd compute from the cert (e.g. expected vs actual).
-        // The service must still find it via actualPublicKeyFingerprint.
+    void looksUpByIssuedCertificateNotByFingerprint() throws Exception {
+        // The fingerprints on the entry are irrelevant to the lookup: the entry
+        // is the one whose confirmation stored this certificate.
         ApprovalRegistry.RegistryEntry entry = ApprovalRegistry.RegistryEntry.builder()
                 .verificationId("VID-5")
                 .compliant(true)
-                .publicKeyFingerprint("EXPECTED-FINGERPRINT-DIFFERENT")
-                .actualPublicKeyFingerprint(publicKeyFingerprint)
+                .publicKeyFingerprint("SOME-OTHER-FINGERPRINT")
+                .actualPublicKeyFingerprint("YET-ANOTHER-FINGERPRINT")
                 .status(RegistryStatus.VERIFIED_AND_ISSUED)
                 .build();
-        registry.putByActual(publicKeyFingerprint, entry);
+        registry.put(signingCert, entry);
 
-        SignatureVerificationRequest request = signedRequest("payload-H");
-
-        SignatureVerificationResponse response = service.verify(request);
+        SignatureVerificationResponse response = service.verify(signedRequest("payload-H"));
 
         assertThat(response.isSignatureValid()).isTrue();
         assertThat(response.isCompliant()).isTrue();
@@ -297,7 +297,7 @@ class SignatureVerificationServiceTest {
 
     @Test
     void writesOneAuditEntryPerSettlementVerification() throws Exception {
-        registry.put(publicKeyFingerprint,
+        registry.put(signingCert,
                 buildEntry("VID-AUDIT", true, RegistryStatus.VERIFIED_AND_ISSUED));
 
         service.verify(signedRequest("payload-I"));
@@ -330,7 +330,7 @@ class SignatureVerificationServiceTest {
         assertThat(notFound.getAuditEntryHashHex())
                 .isEqualTo(auditLog.head().orElseThrow().thisEntryHashHex());
 
-        registry.put(publicKeyFingerprint,
+        registry.put(signingCert,
                 buildEntry("VID-HASH", true, RegistryStatus.VERIFIED_AND_ISSUED));
 
         SignatureVerificationResponse first = service.verify(signedRequest("payload-P"));
@@ -360,7 +360,7 @@ class SignatureVerificationServiceTest {
 
     @Test
     void auditEntryCarriesNoRequestContentBeyondDigests() throws Exception {
-        registry.put(publicKeyFingerprint,
+        registry.put(signingCert,
                 buildEntry("VID-DM", true, RegistryStatus.VERIFIED_AND_ISSUED));
 
         SignatureVerificationRequest request = signedRequest("payload-L");
@@ -396,6 +396,54 @@ class SignatureVerificationServiceTest {
      * application hashes the payload to a digest before sending it to the
      * HSM for signing.
      */
+    /** An entry found by this test's certificate serial and issuer, holding the given PEM. */
+    private ApprovalRegistry.RegistryEntry entryHolding(String pem) {
+        ApprovalRegistry.RegistryEntry entry = buildEntry("VID-STORED", true, RegistryStatus.VERIFIED_AND_ISSUED);
+        entry.setIssuedCertificateSerial(signingCert.getSerialNumber().toString(16));
+        entry.setIssuedCertificateIssuerDn(signingCert.getIssuerX500Principal().getName());
+        entry.setIssuedCertificatePem(pem);
+        registry.putWithoutCertificate(entry);
+        return entry;
+    }
+
+    @Test
+    void aStoredCertificateThatIsAbsentUnparseableOrAnotherOneIsNotFound() throws Exception {
+        X509Certificate other = TestPki.selfSignedCa(TestPki.newRsaKeyPair(2048), "Other Cert");
+        for (String stored : new String[] {null, "not a certificate", TestPki.toPem(other)}) {
+            registry = new FakeApprovalRegistry();
+            service = new SignatureVerificationService(registry, auditLog, new MtlsPrincipalResolver());
+            entryHolding(stored);
+
+            SignatureVerificationResponse response = service.verify(signedRequest("payload-S"));
+
+            assertThat(response.getReason()).as(String.valueOf(stored)).isEqualTo("CERT_NOT_FOUND");
+            assertThat(response.isSignatureValid()).isFalse();
+        }
+    }
+
+    @Test
+    void aPresentedCertificateThatCannotBeParsedIsMalformedInput() throws Exception {
+        registry.put(signingCert, buildEntry("VID-P", true, RegistryStatus.VERIFIED_AND_ISSUED));
+        SignatureVerificationRequest request = signedRequest("payload-P");
+        request.setSigningCertificatePem("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----");
+
+        assertThat(service.verify(request).getReason()).isEqualTo("MALFORMED_INPUT");
+    }
+
+    @Test
+    void aSignatureTheVerifierCannotProcessIsInvalidAndNamesTheEntry() throws Exception {
+        registry.put(signingCert, buildEntry("VID-LEN", true, RegistryStatus.VERIFIED_AND_ISSUED));
+        SignatureVerificationRequest request = signedRequest("payload-L");
+        // One byte: not a valid RSA-2048 signature length, so verify() throws.
+        request.setSignatureBase64(Base64.getEncoder().encodeToString(new byte[] {1}));
+
+        SignatureVerificationResponse response = service.verify(request);
+
+        assertThat(response.getReason()).isEqualTo("SIGNATURE_INVALID");
+        assertThat(response.isSignatureValid()).isFalse();
+        assertThat(response.getAuditEntryId()).isEqualTo("VID-LEN");
+    }
+
     private SignatureVerificationRequest signedRequest(String payload) throws Exception {
         byte[] digest = MessageDigest.getInstance("SHA-512")
                 .digest(payload.getBytes(StandardCharsets.UTF_8));
@@ -434,28 +482,43 @@ class SignatureVerificationServiceTest {
     }
 
     /**
-     * Minimal ApprovalRegistry stand-in. Indexes entries by either
-     * {@code publicKeyFingerprint} or {@code actualPublicKeyFingerprint}
-     * to mirror real implementations' behaviour.
+     * Minimal ApprovalRegistry stand-in. Finds entries by the issued
+     * certificate's serial and issuer, as settlement-time lookup does.
      */
     private static class FakeApprovalRegistry implements ApprovalRegistry {
-        private final java.util.Map<String, RegistryEntry> byPrimary = new java.util.HashMap<>();
-        private final java.util.Map<String, RegistryEntry> byActual = new java.util.HashMap<>();
+        private final java.util.List<RegistryEntry> entries = new java.util.ArrayList<>();
 
-        void put(String fingerprint, RegistryEntry entry) {
-            entry.setPublicKeyFingerprint(fingerprint);
-            byPrimary.put(fingerprint, entry);
+        /** An entry whose confirmation stored {@code cert} as the issued certificate. */
+        void put(X509Certificate cert, RegistryEntry entry) {
+            storeIssued(entry, cert);
+            entries.add(entry);
         }
 
-        void putByActual(String fingerprint, RegistryEntry entry) {
-            byActual.put(fingerprint, entry);
+        /** An entry with no issued certificate stored (never confirmed as issued). */
+        void putWithoutCertificate(RegistryEntry entry) {
+            entries.add(entry);
         }
 
         @Override
-        public Optional<RegistryEntry> findByPublicKeyFingerprint(String fingerprint) {
-            if (byPrimary.containsKey(fingerprint)) return Optional.of(byPrimary.get(fingerprint));
-            if (byActual.containsKey(fingerprint)) return Optional.of(byActual.get(fingerprint));
-            return Optional.empty();
+        public Optional<RegistryEntry> findByIssuedCertificate(java.math.BigInteger serial,
+                javax.security.auth.x500.X500Principal issuer) {
+            return entries.stream()
+                    .filter(e -> e.getIssuedCertificateSerial() != null
+                            && serial.equals(new java.math.BigInteger(e.getIssuedCertificateSerial(), 16))
+                            && issuer.equals(new javax.security.auth.x500.X500Principal(
+                                    e.getIssuedCertificateIssuerDn())))
+                    .findFirst();
+        }
+
+        /** Records {@code cert} as the certificate stored at confirmation, as the real registries do. */
+        private static void storeIssued(RegistryEntry entry, X509Certificate cert) {
+            try {
+                entry.setIssuedCertificatePem(TestPki.toPem(cert));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            entry.setIssuedCertificateSerial(cert.getSerialNumber().toString(16));
+            entry.setIssuedCertificateIssuerDn(cert.getIssuerX500Principal().getName());
         }
 
         // Unused in these tests; throw to make accidental dependencies obvious.

@@ -104,7 +104,7 @@ Procedure:
 1. Obtain the receipt from the financial entity in its original signed form. Record the receipt's `verificationId`.
 2. Call `GET /v1/audit/witness/{verificationId}` against the gatekeeper. The response is the `AuditEntry` for that decision (`requestDigestBase64`, `receiptDigestBase64`, `compliant`, `mtlsClientPrincipal`, etc.) or a `404` if no such entry exists.
 3. If the audit entry is absent, the receipt is forged or the verification ID is wrong. Do not trust the receipt; treat the situation as either an investigation lead (a forged receipt was presented as legitimate) or a clerical error.
-4. If the audit entry is present, recompute SHA-256 over the receipt body the financial entity presented. Compare the digest to `receiptDigestBase64` in the audit entry. They must match.
+4. If the audit entry is present, recompute SHA-256 over the canonical bytes of the receipt the financial entity presented (`ReceiptCanonicalizer.canonicalize(...)`, the pipe-separated form the gatekeeper signed, not the JSON body). Compare the base64 of that digest to `receiptDigestBase64` in the audit entry. They must match.
 5. Verify the receipt's `signature` against the operator certificate. Fetch the operator certificate via `GET /v1/gatekeeper/keys` (use the certificate matching the receipt's `signingCertificate` fingerprint, including retired keys). The signature must verify under the receipt's canonical bytes.
 6. If steps 4 and 5 both succeed, the receipt is genuine and matches the supervisory record. The supervisor's substantive question — whether the underlying HSM evidence in fact justifies the COMPLIANT determination — is a separate matter, but the cryptographic chain of evidence is sound.
 
@@ -114,7 +114,7 @@ Scenario: a Swish technical supplier (TL) is suspected of issuing certificates w
 
 Procedure:
 
-1. Identify the supplier's mTLS principal as the gatekeeper records it. That is not the DN of the client certificate the supplier uses to call the gatekeeper, but the value `gatekeeper.security.mtls.principal-regex` captures from it: by default the CN value alone, so a subject `CN=<TL legal name>,O=<TL legal name>,SERIALNUMBER=<TL org number>` is recorded as `<TL legal name>`, or the SERIALNUMBER value where the NCA configures the regex that way (`application-nca.yaml`). The full DN is recorded only when the regex does not match.
+1. Identify the supplier's mTLS principal as the gatekeeper records it. That is not the DN of the client certificate the supplier uses to call the gatekeeper, but the exact value of the subject attribute named by `gatekeeper.security.mtls.principal-attribute`: by default the CN value alone, so a subject `CN=<TL legal name>,O=<TL legal name>,SERIALNUMBER=<TL org number>` is recorded as `<TL legal name>`, or the SERIALNUMBER value where the NCA sets `principal-attribute: SERIALNUMBER` (`application-nca.yaml`). A certificate whose subject does not carry exactly one such attribute is not authenticated, so no other form of principal is recorded.
 2. URL-encode the principal. Call `GET /v1/audit/entity/{principal}` against the gatekeeper. The comparison is exact, so a full DN returns nothing when the CN value was recorded. The response is the full chronological sequence of audit entries attributable to that principal.
 3. Inspect the entries. Anomalies to look for:
    - Repeated identical `requestDigestBase64` across different `verificationId` values — the same request, public key included, submitted more than once. The digest covers the public key, so it cannot show the same attestation evidence reused for *distinct* keys; that needs the evidence itself, which the audit log does not hold.
@@ -164,6 +164,7 @@ Specific cadence is a supervisory-policy decision under DORA Article 50, not a r
 2. **FE's own issuance register** (DORA Article 28(6) plus Bokföringslagen (1999:1078) 7 kap.). Request from the FE under DORA Article 50(1)(a): list of every cert the FE issued in the period, including key fingerprint, cert serial number, and issuance timestamp.
 3. **Technical provider's transaction logs** (where applicable; in the Swish architecture this is GetSwish AB's payment-transaction record). For each cert serial, the technical provider produces the list of payment transactions signed under it. Used for proportionality assessment under Article 51(2), not for breach detection itself.
 4. **CRL/OCSP data from the issuing CA.** Independent record of which cert serial numbers were actually issued.
+5. **The banks' customer registers.** Request from each bank under DORA Article 50(1)(a): for every customer with a Swish number, the organisation number and, where the customer uses a technical supplier, the supplier's 987 number.
 
 **Triangulation procedure:**
 
@@ -171,7 +172,9 @@ Specific cadence is a supervisory-policy decision under DORA Article 50, not a r
 2. For each cert, find the registry entry in source (1) by certificate serial and issuer DN, or by key fingerprint, and check that the audit log holds a `VERIFY` and a `CONFIRM` entry with that entry's `verificationId`.
 3. Flag every cert in source (2) without a matching pair in source (1). These are the candidate breaches.
 4. Cross-check candidates against source (4): does the issuing CA's CRL/OCSP confirm the cert was actually issued? If yes, the breach is confirmed.
-5. For each confirmed breach, optionally consult source (3) to determine whether the breaching cert was used to sign payment transactions. This goes to proportionality of sanction under Article 51(2), not to whether a breach occurred.
+5. For every registry entry in source (1) with status `VERIFIED_AND_ISSUED` in the period, compare its parties with source (5) *(since 1.6.0)*. Look up the bank's register entry for `customerSwishNumber`. The organisation number must equal `customerOrganisationNumber`. Where `supplierNumber` is set, the register must name that 987 number as the customer's technical supplier; where it is empty, the customer held the key itself and the register must name no technical supplier. Every difference is a candidate for investigation: a key held by someone other than the customer's registered supplier, or a register that does not match the customer's practice.
+6. Where a verifier is found to have been wrong (a later release corrects it), repeat the verification for every registry entry in the affected vendor's path from its `submission`, with the corrected release, and list the entries whose outcome changes *(since 1.6.0; entries written before carry no submission and need the financial entity's copy)*. Before relying on a submission, check that `VerificationService.requestDigestBase64(submission)` equals the entry's `requestDigestBase64` in the audit log.
+7. For each confirmed breach, optionally consult source (3) to determine whether the breaching cert was used to sign payment transactions. This goes to proportionality of sanction under Article 51(2), not to whether a breach occurred.
 
 **Action on confirmed breach (sanction trappstegen):**
 
@@ -274,7 +277,7 @@ The position adopted by this runbook is that the layered DORA Article 28(6) / Ar
 
 The `AuditEntry` record carries the following potentially-personal fields:
 
-- `mtlsClientPrincipal` — the value `gatekeeper.security.mtls.principal-regex` captures from the subject DN of the mTLS client certificate (by default the CN value; the full DN only when the regex does not match; `reference-anonymous` under the permissive reference filter chain). For organisational certificates this is normally not personal data (legal-person attributes only). For natural-person certificates the recorded value can be the person's name and is then personal data.
+- `mtlsClientPrincipal` — the exact value of the subject attribute named by `gatekeeper.security.mtls.principal-attribute` in the mTLS client certificate (by default the CN value; a certificate without that attribute is not authenticated; `reference-anonymous` under the permissive reference filter chain). For organisational certificates this is normally not personal data (legal-person attributes only). For natural-person certificates the recorded value can be the person's name and is then personal data.
 - `verificationId` — a UUID. Not personal data on its own; can become personal in combination with other records.
 - `requestDigestBase64`, `receiptDigestBase64` — SHA-256 digests. Not personal data; they are one-way functions of input.
 - `compliant` — a Boolean. Not personal data on its own.
@@ -306,8 +309,9 @@ The following EU and Swedish provisions anchor the obligations and powers exerci
   - Article 5(2)(b) — management body responsibility for authenticity and integrity standards.
   - Article 6(1) — sound, comprehensive ICT risk management framework.
   - Article 6(10) — financial entity remains fully responsible for verification of compliance.
-  - Article 9(3)(c) and 9(3)(d) — prevent impairment of authenticity and integrity; protection from poor administration.
-  - Article 9(4)(d) — strong authentication mechanisms; dedicated control systems.
+  - Article 9(3)(c) — ICT solutions and processes shall "prevent the lack of availability, the impairment of the authenticity and integrity, the breaches of confidentiality and the loss of data".
+  - Article 9(3)(d) — ICT solutions and processes shall "ensure that data is protected from risks arising from data management, including poor administration, processing-related risks and human error".
+  - Article 9(4)(d) — financial entities shall "implement policies and protocols for strong authentication mechanisms, based on relevant standards and dedicated control systems, and protection measures of cryptographic keys whereby data is encrypted based on results of approved data classification and ICT risk assessment processes".
   - Article 17 — incident reporting windows.
   - Article 19 — substantial incident reports.
   - Article 28(1)(a) — full responsibility irrespective of outsourcing.

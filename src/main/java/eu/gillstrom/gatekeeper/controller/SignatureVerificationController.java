@@ -80,9 +80,10 @@ public class SignatureVerificationController {
                     in directly; gatekeeper does not see, store, or transport
                     the original transaction payload.
 
-                    Audit lookup uses the SHA-256 fingerprint of the
-                    SubjectPublicKeyInfo (uppercase hex, colon-separated) —
-                    the same canonical form used elsewhere in gatekeeper.
+                    The registry entry is found by the issued certificate
+                    (serial number and issuer DN) stored when the issuance
+                    was confirmed; a supplied certificate must be identical
+                    to the stored one.
 
                     Default-deny: settlement-rail enforcement should treat
                     any non-positive result (signature_valid=false or

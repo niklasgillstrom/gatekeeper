@@ -27,14 +27,21 @@ abstract: >-
   DORA article bit depend on a valid attestation signature, builds
   issuer-CA paths through intermediate certificates, and verifies audit-log
   integrity against the file on disk with the configured algorithm and
-  retired keys. Supports the data-minimised quadruple-
+  retired keys. Version 1.6.0 keeps the submitted attestation evidence in
+  the registry, records and signs the customer and the technical supplier
+  (receipt form v3; lockstep upgrade with hsm 1.6.0 required), signs every
+  Step 7 confirmation response, checks certificate validity at settlement,
+  admits only RSA-4096 keys under the default key policy, adds Marvell
+  LiquidSecurity, Thales Luna, Crypto4A, Fortanix and Entrust nShield as
+  vendors (nine in all), and detects every PIT mutant of its production
+  code. Supports the data-minimised quadruple-
   triangulation model: only digest, signature, and certificate identifiers
   traverse the supervisor boundary — transaction payload content is never
   exposed to the supervisor. Companions: hsm (financial-entity-side HSM
   attestation verification) and railgate (central-bank settlement-rail
   enforcement).
-version: "1.5.0"
-date-released: "2026-09-30"
+version: "1.6.0"
+date-released: "2026-10-08"
 license: MIT
 repository-code: "https://github.com/niklasgillstrom/gatekeeper"
 authors:

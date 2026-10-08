@@ -11,7 +11,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATEKEEPER="$(cd "$HERE/.." && pwd)"
 REPOS="$(cd "$GATEKEEPER/.." && pwd)"
-VERSION="1.5.0"
+VERSION="1.6.0"
 
 missing=()
 repo_dir() {

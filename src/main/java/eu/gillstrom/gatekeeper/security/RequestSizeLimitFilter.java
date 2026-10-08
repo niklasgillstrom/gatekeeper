@@ -168,10 +168,7 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
         }
 
         private void account(long n) throws IOException {
-            if (n <= 0) {
-                return;
-            }
-            read += n;
+            read += Math.max(n, 0); // -1 is end of stream
             if (read > maxBytes) {
                 log.warn("Aborting chunked request: body passed the {}-byte cap", maxBytes);
                 throw new RequestBodyTooLargeException(maxBytes);

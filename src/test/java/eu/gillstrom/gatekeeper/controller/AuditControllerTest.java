@@ -226,4 +226,32 @@ class AuditControllerTest {
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         return Base64.getEncoder().encodeToString(md.digest(s.getBytes(StandardCharsets.UTF_8)));
     }
+
+    @Test
+    void anExportOfNinetyDaysIsServedAndOneOfMoreIsRefused() throws Exception {
+        Instant from = Instant.parse("2024-01-01T00:00:00Z");
+        Instant ninety = from.plusSeconds(90L * 24 * 60 * 60);
+
+        assertThat(mockMvc.perform(get("/v1/audit/export")
+                        .param("from", DateTimeFormatter.ISO_INSTANT.format(from))
+                        .param("to", DateTimeFormatter.ISO_INSTANT.format(ninety)))
+                .andReturn().getResponse().getStatus()).isEqualTo(200);
+        assertThat(mockMvc.perform(get("/v1/audit/export")
+                        .param("from", DateTimeFormatter.ISO_INSTANT.format(from))
+                        .param("to", DateTimeFormatter.ISO_INSTANT.format(ninety.plusSeconds(1))))
+                .andReturn().getResponse().getStatus()).isEqualTo(400);
+        assertThat(mockMvc.perform(get("/v1/audit/export")
+                        .param("from", DateTimeFormatter.ISO_INSTANT.format(ninety))
+                        .param("to", DateTimeFormatter.ISO_INSTANT.format(from)))
+                .andReturn().getResponse().getStatus()).isEqualTo(400);
+    }
+
+    @Test
+    void theSignedExportBytesEscapeEveryField() {
+        Instant t = Instant.parse("2026-01-01T00:00:00Z");
+        String bytes = new String(AuditExport.canonicalBytesForSignature("a|b%", t, t, t, 0, List.of(),
+                "head", null), StandardCharsets.UTF_8);
+
+        assertThat(bytes).isEqualTo("v1|a%7Cb%25|" + t + "|" + t + "|" + t + "|0|head|");
+    }
 }

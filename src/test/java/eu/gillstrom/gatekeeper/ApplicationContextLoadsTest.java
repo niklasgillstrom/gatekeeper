@@ -68,4 +68,31 @@ class ApplicationContextLoadsTest {
         assertThat(context.getBean(ReceiptSigner.class))
                 .isInstanceOf(EphemeralReceiptSigner.class);
     }
+
+    /**
+     * The reference chain, built inside the test method (see
+     * {@link NcaProfileAuthorisationTest}): one chain that lets every request
+     * through as the named reference principal, so audit entries say
+     * {@code reference-anonymous} rather than nothing.
+     */
+    @Test
+    void theReferenceChainAdmitsEveryRequestAsTheReferencePrincipal() throws Exception {
+        String dir = System.getProperty("java.io.tmpdir") + "/gatekeeper-open-chain-test";
+        try (org.springframework.context.ConfigurableApplicationContext app =
+                     new org.springframework.boot.builder.SpringApplicationBuilder(
+                             eu.gillstrom.gatekeeper.DoraAttestationGatekeeperApplication.class)
+                             .run("--gatekeeper.audit.path=" + dir + "/audit-log.jsonl",
+                                     "--gatekeeper.registry.path=" + dir + "/approval-registry.jsonl",
+                                     "--server.port=0")) {
+            org.springframework.security.web.FilterChainProxy proxy =
+                    app.getBean(org.springframework.security.web.FilterChainProxy.class);
+            assertThat(proxy.getFilterChains()).hasSize(1);
+            org.springframework.security.web.authentication.AnonymousAuthenticationFilter anonymous =
+                    proxy.getFilterChains().get(0).getFilters().stream()
+                            .filter(f -> f instanceof org.springframework.security.web.authentication.AnonymousAuthenticationFilter)
+                            .map(f -> (org.springframework.security.web.authentication.AnonymousAuthenticationFilter) f)
+                            .findFirst().orElseThrow();
+            assertThat(anonymous.getPrincipal()).isEqualTo("reference-anonymous");
+        }
+    }
 }

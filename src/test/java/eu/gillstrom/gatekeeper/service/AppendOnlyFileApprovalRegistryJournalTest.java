@@ -86,4 +86,44 @@ class AppendOnlyFileApprovalRegistryJournalTest {
         assertThat(entry.getStatus()).isEqualTo(RegistryStatus.VERIFIED_AND_ISSUED);
         assertThat(entry.getConfirmationTimestamp()).isNull();
     }
+
+    @Test
+    void thePartiesAreJournalledAndReplayed(@org.junit.jupiter.api.io.TempDir Path dir) throws Exception {
+        Path journal = dir.resolve("parties.jsonl");
+        registryAt(journal).register("SE-P", "nonce", true, "fp",
+                new ApprovalRegistry.Parties("5569743098", "1231015932", "5566778899", "9871234567", "TL AB"),
+                "SECUROSYS", "Primus HSM", "SE", "CN=FE");
+
+        ApprovalRegistry.RegistryEntry replayed = registryAt(journal).lookup("SE-P").orElseThrow();
+
+        org.assertj.core.api.Assertions.assertThat(replayed.getCustomerOrganisationNumber()).isEqualTo("5569743098");
+        org.assertj.core.api.Assertions.assertThat(replayed.getCustomerSwishNumber()).isEqualTo("1231015932");
+        org.assertj.core.api.Assertions.assertThat(replayed.getSupplierIdentifier()).isEqualTo("5566778899");
+        org.assertj.core.api.Assertions.assertThat(replayed.getSupplierNumber()).isEqualTo("9871234567");
+        org.assertj.core.api.Assertions.assertThat(replayed.getSupplierName()).isEqualTo("TL AB");
+    }
+
+    @Test
+    void theSubmissionIsJournalledAndReplayedWithTheSameDigest(@org.junit.jupiter.api.io.TempDir Path dir) throws Exception {
+        Path journal = dir.resolve("submission.jsonl");
+        eu.gillstrom.gatekeeper.model.VerificationRequest sent = new eu.gillstrom.gatekeeper.model.VerificationRequest();
+        sent.setPublicKey("-----BEGIN PUBLIC KEY-----\nAA==\n-----END PUBLIC KEY-----");
+        sent.setHsmVendor("YUBICO");
+        sent.setAttestationData("YXR0ZXN0YXRpb24=");
+        sent.setAttestationCertChain(java.util.List.of("-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----"));
+        sent.setCustomerOrganisationNumber("5569743098");
+        sent.setCustomerSwishNumber("1231015932");
+        sent.setKeyPurpose("Swish SIGNING");
+        sent.setCountryCode("SE");
+        registryAt(journal).register("SE-S", "nonce", true, "fp",
+                new ApprovalRegistry.Parties("5569743098", "1231015932", null, null, null), sent,
+                "Yubico", "YubiHSM 2", "SE", "CN=FE");
+
+        eu.gillstrom.gatekeeper.model.VerificationRequest replayed =
+                registryAt(journal).lookup("SE-S").orElseThrow().getSubmission();
+
+        org.assertj.core.api.Assertions.assertThat(replayed).isEqualTo(sent);
+        org.assertj.core.api.Assertions.assertThat(VerificationService.requestDigestBase64(replayed))
+                .isEqualTo(VerificationService.requestDigestBase64(sent));
+    }
 }

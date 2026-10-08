@@ -15,7 +15,6 @@ import org.springframework.security.core.authority.AuthorityUtils;
 import org.springframework.security.core.userdetails.User;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.preauth.x509.X509AuthenticationFilter;
-import org.springframework.security.web.authentication.preauth.x509.X509PrincipalExtractor;
 
 import java.security.cert.X509Certificate;
 import java.util.List;
@@ -27,20 +26,20 @@ import java.util.List;
  * <h2>Authentication</h2>
  *
  * <p>When {@code gatekeeper.security.mtls.enabled=true}, the
- * {@link #mtlsFilterChain(HttpSecurity, RoleMappingProperties, String)
+ * {@link #mtlsFilterChain(HttpSecurity, RoleMappingProperties, String, String)
  * mtlsFilterChain} bean is active. Every authenticated request is
  * required to present a valid client certificate, validated against the
  * Tomcat-configured truststore (per {@code application-nca.yaml}).
- * The CN of the client certificate is extracted via
- * {@code gatekeeper.security.mtls.principal-regex} (default
- * {@code CN=(.*?)(?:,|$)}) and used as the request principal.</p>
+ * The request principal is the exact value of one subject attribute of the
+ * client certificate, named by {@code gatekeeper.security.mtls.principal-attribute}
+ * (default {@code CN}); see {@link SubjectAttributePrincipalExtractor}.</p>
  *
  * <h2>Authorisation</h2>
  *
  * <p>Roles are assigned to a request principal by
  * {@link RoleMappingProperties}: a list of CN-pattern → role-set
  * mappings, configured via {@code gatekeeper.security.roles}.
- * The two defined roles are:</p>
+ * The three defined roles are:</p>
  *
  * <ul>
  *   <li><strong>{@code SUPERVISOR}</strong> — NCA staff. Full access
@@ -52,6 +51,9 @@ import java.util.List;
  *       ({@code /v1/attestation/&#x7b;cc&#x7d;/verify},
  *       {@code /v1/attestation/&#x7b;cc&#x7d;/verify/batch},
  *       {@code /v1/attestation/&#x7b;cc&#x7d;/confirm}).</li>
+ *   <li><strong>{@code SETTLEMENT_RAIL}</strong> — the settlement system
+ *       (railgate). Settlement-time signature verification
+ *       ({@code POST /api/v1/verify}) only.</li>
  * </ul>
  *
  * <p>{@code SUPERVISOR}-only paths are denied to {@code FE}; the verify/
@@ -59,9 +61,10 @@ import java.util.List;
  * {@code /v1/attestation/health}, {@code /v1/attestation/supported-vendors},
  * {@code /v1/gatekeeper/keys}, {@code /v1/gatekeeper/anchor},
  * {@code /swagger-ui/**}, {@code /swagger-ui.html} and
- * {@code /v3/api-docs/**}. The two gatekeeper endpoints are public because
+ * {@code /v3/api-docs/**}. The two gatekeeper endpoints need no role because
  * a relying party must be able to verify retroactive evidence under DORA
- * Article 28(6) without holding a client certificate; the rest are
+ * Article 28(6); under the {@code nca} profile the TLS layer still requires
+ * a client certificate from a trusted CA ({@code client-auth: need}). The rest are
  * liveness and documentation. {@code /v1/gatekeeper/health} is
  * <em>not</em> in that set — it reports operational state, not evidence,
  * and requires {@code SUPERVISOR}.</p>
@@ -95,11 +98,20 @@ public class SecurityConfig {
     @ConditionalOnProperty(name = "gatekeeper.security.mtls.enabled", havingValue = "true")
     public SecurityFilterChain mtlsFilterChain(HttpSecurity http,
                                                RoleMappingProperties roleMappings,
-                                               @Value("${gatekeeper.security.mtls.principal-regex:CN=(.*?)(?:,|$)}")
-                                               String principalRegex) throws Exception {
-        log.info("mTLS SecurityFilterChain enabled; principal regex='{}'; "
+                                               @Value("${gatekeeper.security.mtls.principal-attribute:CN}")
+                                               String principalAttribute,
+                                               @Value("${gatekeeper.security.mtls.principal-regex:#{null}}")
+                                               String legacyPrincipalRegex) throws Exception {
+        if (legacyPrincipalRegex != null) {
+            // Refuse rather than silently ignore: a deployment that set the
+            // regex to SERIALNUMBER would otherwise fall back to CN.
+            throw new IllegalStateException("gatekeeper.security.mtls.principal-regex was removed in 1.6.0; "
+                    + "set gatekeeper.security.mtls.principal-attribute to the subject attribute instead "
+                    + "(e.g. CN or SERIALNUMBER)");
+        }
+        log.info("mTLS SecurityFilterChain enabled; principal attribute='{}'; "
                 + "{} role mapping(s) configured; default roles={}",
-                principalRegex,
+                principalAttribute,
                 roleMappings.getMappings().size(),
                 roleMappings.getDefaultRoles());
 
@@ -169,7 +181,7 @@ public class SecurityConfig {
                 .anyRequest().denyAll()
             )
             .x509(x509 -> x509
-                .x509PrincipalExtractor(principalExtractor(principalRegex))
+                .x509PrincipalExtractor(new SubjectAttributePrincipalExtractor(principalAttribute))
                 .userDetailsService(username -> {
                     List<String> bareRoles = roleMappings.resolve(username);
                     String[] authorities = bareRoles.stream()
@@ -214,18 +226,6 @@ public class SecurityConfig {
             .anonymous(a -> a.principal("reference-anonymous")
                     .authorities(AuthorityUtils.createAuthorityList("ROLE_REFERENCE_ANON")));
         return http.build();
-    }
-
-    private X509PrincipalExtractor principalExtractor(String regex) {
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(regex);
-        return (X509Certificate cert) -> {
-            String dn = cert.getSubjectX500Principal().getName();
-            java.util.regex.Matcher m = pattern.matcher(dn);
-            if (m.find() && m.groupCount() >= 1) {
-                return m.group(1);
-            }
-            return dn;
-        };
     }
 
     // Suppress the unused-import warning when the project compiles without the

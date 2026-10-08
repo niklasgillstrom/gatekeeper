@@ -13,7 +13,7 @@ import java.util.regex.Pattern;
  * <p>Each {@link Mapping} declares a regular expression that matches the
  * principal extracted from the X.509 client certificate (typically the
  * Subject CN, but the principal extractor is configurable via
- * {@code gatekeeper.security.mtls.principal-regex}). When a request comes
+ * {@code gatekeeper.security.mtls.principal-attribute}). When a request comes
  * in, the mappings are tried in order; the first that matches contributes
  * its {@code roles} to the request's set of granted authorities. If no
  * mapping matches, {@link #defaultRoles} applies.</p>
@@ -32,6 +32,9 @@ import java.util.regex.Pattern;
  *       endpoints only. For financial entities calling the gatekeeper to
  *       satisfy their Article 6(10) verification duty before issuing a
  *       certificate.</li>
+ *   <li><strong>{@code SETTLEMENT_RAIL}</strong> — the settlement system
+ *       (railgate). Settlement-time signature verification
+ *       ({@code POST /api/v1/verify}) only.</li>
  * </ul>
  *
  * <h2>YAML configuration shape</h2>

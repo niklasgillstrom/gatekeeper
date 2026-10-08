@@ -59,8 +59,10 @@ import java.util.concurrent.locks.ReentrantLock;
  * <p>Recovery: at startup the file is read line-by-line and chain
  * integrity is validated. A trailing line that fails to parse is treated
  * as an aborted append (e.g. process killed mid-write) and is best-effort
- * truncated; any earlier corruption is reported at WARN but does not
- * prevent boot — the operator must investigate. Mid-file corruption MUST
+ * truncated. An earlier line that does not parse stops start-up with an
+ * {@code AuditLogException}. A file that parses but whose chain does not
+ * verify is reported at WARN and does not prevent boot — the operator must
+ * investigate, and {@code GET /v1/gatekeeper/health} reports it. Mid-file corruption MUST
  * fail {@link #verifyChainIntegrity()} so it is detectable by supervisory
  * tooling.</p>
  *
@@ -170,7 +172,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
                 loadExisting();
             } else {
                 Path parent = filePath.getParent();
-                if (parent != null && !Files.exists(parent)) {
+                if (parent != null) {
                     Files.createDirectories(parent);
                 }
                 // Eager creation so that 0640 permissions are applied even when
@@ -234,7 +236,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
 
         // Run a full chain-integrity check after loading so any tampering
         // since the previous shutdown is surfaced at startup, not only the
-        // first time a supervisor calls /v1/audit/health.
+        // first time a supervisor calls /v1/gatekeeper/health.
         boolean intactAtBoot = verifyChain(List.copyOf(entries));
         cachedIntegrity.set(new IntegrityStatus(intactAtBoot, Instant.now()));
         if (!intactAtBoot && !entries.isEmpty()) {
@@ -317,9 +319,8 @@ public class AppendOnlyFileAuditLog implements AuditLog {
 
             return entry;
         } finally {
-            if (appendLock.isHeldByCurrentThread()) {
-                appendLock.unlock();
-            }
+            // Reached only after lockInterruptibly() succeeded.
+            appendLock.unlock();
         }
     }
 
@@ -478,7 +479,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
         if (status == null || status.checkedAt() == null) {
             return false;
         }
-        if (integrityCheckIntervalSeconds <= 0) {
+        if (integrityCheckIntervalSeconds < 1) {
             return false;
         }
         return Instant.now().isBefore(status.checkedAt().plusSeconds(integrityCheckIntervalSeconds));
@@ -642,12 +643,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
     private static String sha256Hex(byte[] in) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] d = md.digest(in);
-            StringBuilder sb = new StringBuilder(d.length * 2);
-            for (byte b : d) {
-                sb.append(String.format("%02x", b & 0xff));
-            }
-            return sb.toString();
+            return java.util.HexFormat.of().formatHex(md.digest(in));
         } catch (NoSuchAlgorithmException nsae) {
             // SHA-256 is mandated by every JRE; reaching this branch is a
             // platform misconfiguration we cannot recover from.

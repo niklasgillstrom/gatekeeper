@@ -14,7 +14,8 @@ final class ReceiptCheck {
 
     private static final String[] TEXT_FIELDS = {
             "publicKeyFingerprint", "publicKeyAlgorithm", "hsmVendor", "hsmModel", "hsmSerialNumber",
-            "supplierIdentifier", "supplierName", "keyPurpose", "countryCode"};
+            "customerOrganisationNumber", "customerSwishNumber", "supplierIdentifier", "supplierNumber",
+            "supplierName", "keyPurpose", "countryCode"};
 
     private static final String[] KEY_PROPERTIES = {
             "generatedOnDevice", "exportable", "attestationChainValid", "publicKeyMatchesAttestation"};
@@ -25,9 +26,9 @@ final class ReceiptCheck {
     private ReceiptCheck() {
     }
 
-    static byte[] canonicalV2(JsonNode receipt) {
+    static byte[] canonicalV3(JsonNode receipt) {
         StringJoiner joiner = new StringJoiner("|");
-        joiner.add("v2");
+        joiner.add("v3");
         joiner.add(safe(text(receipt, "verificationId")));
         joiner.add(safe(text(receipt, "confirmationNonce")));
         joiner.add(Boolean.toString(receipt.path("compliant").asBoolean(false)));
@@ -47,7 +48,7 @@ final class ReceiptCheck {
         }
         Signature verifier = Signature.getInstance("SHA256withRSA");
         verifier.initVerify(trusted.getPublicKey());
-        verifier.update(canonicalV2(receipt));
+        verifier.update(canonicalV3(receipt));
         return verifier.verify(Base64.getDecoder().decode(signature));
     }
 

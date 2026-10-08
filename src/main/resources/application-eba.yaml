@@ -1,16 +1,18 @@
 ## EBA Verification Profile
 ## Activate with: --spring.profiles.active=eba
 ##
-## This profile enables the EBA independent verification endpoints.
-## These endpoints allow EBA to verify HSM attestation without
-## requiring the entity's cooperation.
+## The profile has no EBA-specific endpoints or beans: the code contains no
+## @Profile, so the same endpoints are served under every profile. It sets the
+## port and keeps the OpenAPI document off; mTLS stays off and the receipt
+## signer ephemeral (application.yaml defaults), which makes it the reference /
+## developer profile the README describes.
 
 server:
   port: 8080
 
 spring:
   application:
-    name: hsm
+    name: gatekeeper
 
 # OpenAPI document and Swagger UI are off in every non-dev profile. Neither has
 # a run-time function in this service, and the UI is a third-party JavaScript
@@ -26,6 +28,3 @@ springdoc:
     path: /swagger-ui.html
     operationsSorter: method
 
-logging:
-  level:
-    eu.gillstrom.hsm: DEBUG

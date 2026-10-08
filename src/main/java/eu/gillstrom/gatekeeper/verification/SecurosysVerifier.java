@@ -8,7 +8,6 @@ import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import eu.gillstrom.gatekeeper.model.HsmVendor;
 
-import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.ByteArrayInputStream;
@@ -185,6 +184,21 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
             result.setSensitive(sensitive);
             result.setAlwaysSensitive(alwaysSensitive);
 
+            // Key origin. The attestation states it explicitly in the root
+            // element: <private_key creation="generated">. never_extractable
+            // and always_sensitive are not origin attributes (PKCS#11 keeps
+            // origin in CKA_LOCAL), so a key created outside the HSM and
+            // imported with extractable=false is not excluded by them.
+            String creation = "private_key".equals(doc.getDocumentElement().getTagName())
+                    ? doc.getDocumentElement().getAttribute("creation") : "";
+            result.setKeyOrigin(creation.isEmpty() ? null : creation);
+            boolean generated = "generated".equals(creation);
+            if (!generated) {
+                result.addError("SECUROSYS_KEY_NOT_GENERATED: the attestation does not state "
+                        + "<private_key creation=\"generated\"> (creation="
+                        + (creation.isEmpty() ? "<missing>" : creation) + ")");
+            }
+
             result.setKeyLabel(firstElementText(doc, "label"));
             result.setAlgorithm(firstElementText(doc, "algorithm"));
             result.setKeySize(firstElementText(doc, "key_size"));
@@ -201,7 +215,7 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
 
             result.setValid(result.isChainValid() && result.isSignatureValid()
                     && result.isPublicKeyMatch() && !extractable && neverExtractable
-                    && sensitive && alwaysSensitive);
+                    && sensitive && alwaysSensitive && generated);
 
         } catch (Exception e) {
             log.warn("Securosys attestation verification threw: {}", e.getMessage(), e);
@@ -213,16 +227,20 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
 
     /**
      * Parse XML with XXE and external-entity protection.
+     *
+     * <p>Any DOCTYPE is a fatal error ({@code disallow-doctype-decl}; a parser
+     * that does not support the feature makes {@code setFeature} throw, so the
+     * attestation is refused). Without a DOCTYPE there is no DTD, no external
+     * DTD to load, no general or parameter entity to declare or expand, and no
+     * entity reference other than the five predefined ones, so the separate
+     * entity and external-DTD switches have nothing left to act on. XInclude is
+     * off by default ({@link DocumentBuilderFactory#isXIncludeAware()}).</p>
      */
     private Document parseXmlSafely(byte[] xmlBytes) throws Exception {
-        DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
-        dbf.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        // newDefaultInstance() is always the JDK's built-in parser, whatever else
+        // is on the classpath; it applies the jdk.xml.* resource limits by default.
+        DocumentBuilderFactory dbf = DocumentBuilderFactory.newDefaultInstance();
         dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-        dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
-        dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-        dbf.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
-        dbf.setXIncludeAware(false);
-        dbf.setExpandEntityReferences(false);
         DocumentBuilder db = dbf.newDocumentBuilder();
         return db.parse(new ByteArrayInputStream(xmlBytes));
     }
@@ -309,9 +327,17 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
 
     @Override
     public boolean verifyChain(X509Certificate attestationCert, X509Certificate[] chain) {
-        // Chain validation is performed as part of verifySecurosysAttestation;
-        // this interface entry point is retained for API compatibility only.
-        return true;
+        // The same PKIX validation verifySecurosysAttestation runs. This entry
+        // point returned true for any input until 1.6.0.
+        if (attestationCert == null) {
+            return false;
+        }
+        List<X509Certificate> all = new ArrayList<>();
+        all.add(attestationCert);
+        if (chain != null) {
+            all.addAll(java.util.Arrays.asList(chain));
+        }
+        return verifyCertChain(all.toArray(new X509Certificate[0]));
     }
 
     @Override
@@ -337,6 +363,7 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
         private String algorithm;
         private String keySize;
         private String createTime;
+        private String keyOrigin;
         private String hsmSerialNumber;
         private final List<String> errors = new ArrayList<>();
 
@@ -374,6 +401,10 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
 
         public String getKeySize() { return keySize; }
         public void setKeySize(String keySize) { this.keySize = keySize; }
+
+        /** The {@code creation} attribute of the attestation, e.g. {@code generated}; null if absent. */
+        public String getKeyOrigin() { return keyOrigin; }
+        public void setKeyOrigin(String keyOrigin) { this.keyOrigin = keyOrigin; }
 
         public String getCreateTime() { return createTime; }
         public void setCreateTime(String createTime) { this.createTime = createTime; }

@@ -1,6 +1,5 @@
 package eu.gillstrom.gatekeeper.service;
 
-import eu.gillstrom.gatekeeper.util.Fingerprints;
 
 import eu.gillstrom.gatekeeper.audit.AuditAppendRequest;
 import eu.gillstrom.gatekeeper.audit.AuditEntry;
@@ -45,9 +44,9 @@ import java.util.HexFormat;
  * collision resistance ensures the digest uniquely binds the signature
  * to the exact transaction performed.
  *
- * <p>Compliance status is read from the approval registry by computing
- * the SHA-256 fingerprint of the SubjectPublicKeyInfo (uppercase hex,
- * colon-separated) and looking up the entry by that fingerprint. The
+ * <p>Compliance status is read from the approval registry entry found by
+ * the issued certificate (serial number and issuer DN), which is stored
+ * when the issuance is confirmed as {@code VERIFIED_AND_ISSUED}. The
  * combined result {@code (signatureValid, compliant)} is what railgate
  * uses for default-deny enforcement.
  *
@@ -128,72 +127,8 @@ public class SignatureVerificationService {
     }
 
     private SignatureVerificationResponse verifyInternal(SignatureVerificationRequest request) {
-        String certificatePem = request.getSigningCertificatePem();
-        if (certificatePem == null || certificatePem.isBlank()) {
-            if (isBlank(request.getCertSerial()) || isBlank(request.getIssuerDn())) {
-                return SignatureVerificationResponse.builder()
-                        .signatureValid(false)
-                        .compliant(false)
-                        .reason("MALFORMED_INPUT")
-                        .build();
-            }
-            BigInteger serial;
-            X500Principal issuer;
-            try {
-                serial = parseSerialHex(request.getCertSerial());
-                issuer = new X500Principal(request.getIssuerDn());
-            } catch (IllegalArgumentException e) {
-                return SignatureVerificationResponse.builder()
-                        .signatureValid(false)
-                        .compliant(false)
-                        .reason("MALFORMED_INPUT")
-                        .build();
-            }
-            ApprovalRegistry.RegistryEntry certificateEntry =
-                    approvalRegistry.findByIssuedCertificate(serial, issuer).orElse(null);
-            if (certificateEntry == null
-                    || !storedCertificateMatches(certificateEntry.getIssuedCertificatePem(), serial, issuer)) {
-                return SignatureVerificationResponse.builder()
-                        .signatureValid(false)
-                        .compliant(false)
-                        .reason("CERT_NOT_FOUND")
-                        .build();
-            }
-            certificatePem = certificateEntry.getIssuedCertificatePem();
-        }
-
-        // Step 1: Parse certificate, extract public key.
-        X509Certificate cert;
-        PublicKey publicKey;
-        try {
-            cert = parseCertificate(certificatePem);
-            publicKey = cert.getPublicKey();
-        } catch (Exception e) {
-            log.warn("Settlement-time verify: certificate parse failure: {}", e.getMessage());
-            return SignatureVerificationResponse.builder()
-                    .signatureValid(false)
-                    .compliant(false)
-                    .reason("MALFORMED_INPUT")
-                    .build();
-        }
-
-        // Step 2: Compute the public-key fingerprint and look up audit entry.
-        String fingerprint;
-        try {
-            fingerprint = sha256Fingerprint(publicKey.getEncoded());
-        } catch (Exception e) {
-            log.warn("Settlement-time verify: fingerprint computation failure: {}", e.getMessage());
-            return SignatureVerificationResponse.builder()
-                    .signatureValid(false)
-                    .compliant(false)
-                    .reason("MALFORMED_INPUT")
-                    .build();
-        }
-
-        ApprovalRegistry.RegistryEntry registryEntry = approvalRegistry
-                .findByPublicKeyFingerprint(fingerprint).orElse(null);
-
-        // Step 3: Decode digest and signature.
+        // Step 1: Decode digest and signature, so malformed input is reported as
+        // such whether or not the certificate is known.
         byte[] digestBytes;
         byte[] signatureBytes;
         try {
@@ -207,7 +142,63 @@ public class SignatureVerificationService {
                     .build();
         }
 
-        // Step 4: Cryptographic verification.
+        // Step 2: Resolve the registry entry through the ISSUED CERTIFICATE.
+        //
+        // The entry is found by the certificate's (serial, issuer) and only
+        // among entries whose confirmation stored an issued certificate — that
+        // happens only on VERIFIED_AND_ISSUED. Two earlier designs were unsafe:
+        //  - Looking the entry up by public-key fingerprint let any FE make
+        //    another FE's settlements fail: confirming its own verification
+        //    with the victim's (public) certificate produced a newer
+        //    ANOMALY_PUBLIC_KEY_MISMATCH entry carrying the victim's key
+        //    fingerprint, and that entry won the lookup.
+        //  - When the request carried the certificate PEM, the PEM itself was
+        //    never checked against anything, so a self-signed certificate for
+        //    a key that had been verified but never issued settled.
+        // A presented PEM is therefore only accepted if it is byte-identical
+        // to the certificate stored at confirmation.
+        BigInteger serial;
+        X500Principal issuer;
+        X509Certificate presented = null;
+        String presentedPem = request.getSigningCertificatePem();
+        if (presentedPem != null && !presentedPem.isBlank()) {
+            try {
+                presented = parseCertificate(presentedPem);
+            } catch (Exception e) {
+                log.warn("Settlement-time verify: certificate parse failure: {}", e.getMessage());
+                return deny(false, null, "MALFORMED_INPUT");
+            }
+            serial = presented.getSerialNumber();
+            issuer = presented.getIssuerX500Principal();
+        } else {
+            if (isBlank(request.getCertSerial()) || isBlank(request.getIssuerDn())) {
+                return deny(false, null, "MALFORMED_INPUT");
+            }
+            try {
+                serial = parseSerialHex(request.getCertSerial());
+                issuer = new X500Principal(request.getIssuerDn());
+            } catch (IllegalArgumentException e) {
+                return deny(false, null, "MALFORMED_INPUT");
+            }
+        }
+
+        ApprovalRegistry.RegistryEntry registryEntry =
+                approvalRegistry.findByIssuedCertificate(serial, issuer).orElse(null);
+        X509Certificate cert = registryEntry == null
+                ? null
+                : storedCertificate(registryEntry.getIssuedCertificatePem(), serial, issuer);
+        if (cert == null) {
+            return deny(false, null, "CERT_NOT_FOUND");
+        }
+        // Certificate.equals compares the encoded forms.
+        if (presented != null && !presented.equals(cert)) {
+            log.warn("Settlement-time verify: presented certificate differs from the one stored "
+                    + "for verificationId={}", registryEntry.getVerificationId());
+            return deny(false, null, "CERT_NOT_FOUND");
+        }
+        PublicKey publicKey = cert.getPublicKey();
+
+        // Step 3: Cryptographic verification.
         boolean signatureValid;
         try {
             String algorithm = request.getAlgorithm() == null ? DEFAULT_ALGORITHM : request.getAlgorithm();
@@ -226,18 +217,12 @@ public class SignatureVerificationService {
             sig.initVerify(publicKey);
             sig.update(digestBytes);
             signatureValid = sig.verify(signatureBytes);
-        } catch (java.security.NoSuchAlgorithmException e) {
-            return SignatureVerificationResponse.builder()
-                    .signatureValid(false)
-                    .compliant(false)
-                    .reason("ALGORITHM_NOT_SUPPORTED")
-                    .build();
         } catch (Exception e) {
             log.warn("Settlement-time verify: cryptographic operation failed: {}", e.getMessage());
             return SignatureVerificationResponse.builder()
                     .signatureValid(false)
                     .compliant(false)
-                    .auditEntryId(registryEntry == null ? null : registryEntry.getVerificationId())
+                    .auditEntryId(registryEntry.getVerificationId())
                     .reason("SIGNATURE_INVALID")
                     .build();
         }
@@ -246,18 +231,17 @@ public class SignatureVerificationService {
             return SignatureVerificationResponse.builder()
                     .signatureValid(false)
                     .compliant(false)
-                    .auditEntryId(registryEntry == null ? null : registryEntry.getVerificationId())
+                    .auditEntryId(registryEntry.getVerificationId())
                     .reason("SIGNATURE_INVALID")
                     .build();
         }
 
-        // Step 5: Combine cryptographic result with compliance status.
-        if (registryEntry == null) {
-            return SignatureVerificationResponse.builder()
-                    .signatureValid(true)
-                    .compliant(false)
-                    .reason("CERT_NOT_FOUND")
-                    .build();
+        // Step 4: Combine cryptographic result with the certificate's validity
+        // period and the registry status.
+        try {
+            cert.checkValidity();
+        } catch (java.security.cert.CertificateException e) {
+            return deny(true, registryEntry.getVerificationId(), "CERT_EXPIRED");
         }
 
         boolean compliant = isSettlementCompliant(registryEntry);
@@ -282,20 +266,27 @@ public class SignatureVerificationService {
      * is precisely the circumvention the Step-7 loop exists to detect.</p>
      *
      * <p>A settlement is therefore allowed only when the verification was
-     * compliant <em>and</em> the confirmation did not end in an anomaly or a
-     * rejection. A {@code null} status means Step 7 has not been received
-     * yet; that is the ordinary state between issuance and confirmation and
-     * is not by itself disqualifying.</p>
+     * compliant <em>and</em> the confirmation recorded
+     * {@code VERIFIED_AND_ISSUED}. Until 1.6.0 a {@code null} status
+     * (Step 7 not yet received) and {@code VERIFIED_NOT_ISSUED} also settled.
+     * Neither has an issued certificate stored, so the certificate presented
+     * at settlement could not be checked against anything, and a self-signed
+     * certificate for a key that was verified but never issued settled. The
+     * integration guide already requires that a certificate is not delivered
+     * before its confirmation completes.</p>
      */
     private static boolean isSettlementCompliant(ApprovalRegistry.RegistryEntry entry) {
-        if (!entry.isCompliant()) {
-            return false;
-        }
-        RegistryStatus status = entry.getStatus();
-        if (status == null) {
-            return true;
-        }
-        return !status.name().startsWith("ANOMALY") && status != RegistryStatus.REJECTED_NOT_ISSUED;
+        return entry.isCompliant() && entry.getStatus() == RegistryStatus.VERIFIED_AND_ISSUED;
+    }
+
+    private static SignatureVerificationResponse deny(boolean signatureValid, String auditEntryId,
+            String reason) {
+        return SignatureVerificationResponse.builder()
+                .signatureValid(signatureValid)
+                .compliant(false)
+                .auditEntryId(auditEntryId)
+                .reason(reason)
+                .build();
     }
 
     /**
@@ -401,17 +392,19 @@ public class SignatureVerificationService {
         return new BigInteger(hex, 16);
     }
 
-    private static boolean storedCertificateMatches(String pem, BigInteger serial, X500Principal issuer) {
+    /** The stored certificate, or null when it is absent, unparseable or not the one looked up. */
+    private static X509Certificate storedCertificate(String pem, BigInteger serial, X500Principal issuer) {
         if (pem == null) {
-            return false;
+            return null;
         }
         try {
             X509Certificate stored = parseCertificate(pem);
-            return serial.equals(stored.getSerialNumber())
-                    && issuer.equals(stored.getIssuerX500Principal());
+            return serial.equals(stored.getSerialNumber()) && issuer.equals(stored.getIssuerX500Principal())
+                    ? stored
+                    : null;
         } catch (Exception e) {
             log.warn("Settlement-time verify: stored certificate could not be parsed: {}", e.getMessage());
-            return false;
+            return null;
         }
     }
 
@@ -421,21 +414,4 @@ public class SignatureVerificationService {
                 new ByteArrayInputStream(pem.getBytes(StandardCharsets.UTF_8)));
     }
 
-    /**
-     * SHA-256 fingerprint of the SubjectPublicKeyInfo encoding, formatted as
-     * LOWERCASE hex with colon separators (e.g. "ab:cd:..").
-     *
-     * <p>The case matters. Registry entries are written by
-     * {@code VerificationService.fingerprint(PublicKey)} in lowercase, and
-     * lookup in both {@code InMemoryApprovalRegistry} and
-     * {@code AppendOnlyFileApprovalRegistry} is a case-sensitive
-     * {@code equals}. This method previously emitted uppercase, so every
-     * settlement-time query fell through to CERT_NOT_FOUND and
-     * {@code /api/v1/verify} could never return compliant=true. The defect was
-     * invisible in tests because the test double recomputed the fingerprint in
-     * the same uppercase form.</p>
-     */
-    private static String sha256Fingerprint(byte[] subjectPublicKeyInfo) {
-        return Fingerprints.ofSubjectPublicKeyInfo(subjectPublicKeyInfo);
-    }
 }

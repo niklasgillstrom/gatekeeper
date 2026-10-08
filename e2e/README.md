@@ -1,4 +1,4 @@
-# gatekeeper/e2e — local end-to-end test of hsm, gatekeeper and railgate 1.5.0
+# gatekeeper/e2e — local end-to-end test of hsm, gatekeeper and railgate 1.6.0
 
 A local test only. It starts the three already-built service jars as child processes on free loopback ports, drives the real HTTP flow between them, and stops them afterwards. It deploys nothing and calls nothing outside `127.0.0.1`.
 
@@ -9,16 +9,16 @@ It lives in the gatekeeper repository because the supervisor that operates gatek
 Clone the three repositories side by side, at the same release:
 
 ```
-git clone --branch v1.5.0 https://github.com/niklasgillstrom/gatekeeper.git
-git clone --branch v1.5.0 https://github.com/niklasgillstrom/hsm.git
-git clone --branch v1.5.0 https://github.com/niklasgillstrom/railgate.git
+git clone --branch v1.6.0 https://github.com/niklasgillstrom/gatekeeper.git
+git clone --branch v1.6.0 https://github.com/niklasgillstrom/hsm.git
+git clone --branch v1.6.0 https://github.com/niklasgillstrom/railgate.git
 (cd gatekeeper && mvn verify)
 (cd hsm && mvn verify)
 (cd railgate && mvn verify)
 cd gatekeeper/e2e && ./run.sh
 ```
 
-hsm and railgate are looked up next to the gatekeeper checkout; `-De2e.reposDir=<dir>` points elsewhere. `run.sh` checks that the three `target/*-1.5.0.jar` exist, stops processes left over from an interrupted run, and runs `mvn -B verify` here. Requires Java 21 or later (`java` and `keytool`; `-De2e.javaHome=<JDK>` selects another JDK for the three services) and Maven. Logs from the three services are written to `target/e2e-logs/`, working files to `target/e2e-work/`.
+hsm and railgate are looked up next to the gatekeeper checkout; `-De2e.reposDir=<dir>` points elsewhere. `run.sh` checks that the three `target/*-1.6.0.jar` exist, stops processes left over from an interrupted run, and runs `mvn -B verify` here. Requires Java 21 or later (`java` and `keytool`; `-De2e.javaHome=<JDK>` selects another JDK for the three services) and Maven. Logs from the three services are written to `target/e2e-logs/`, working files to `target/e2e-work/`.
 
 ## What is exercised, and how
 
@@ -33,11 +33,11 @@ hsm and railgate are looked up next to the gatekeeper checkout; `-De2e.reposDir=
 | 10 | `railgateCallsGatekeeperAndPassesItsVerdictsThrough` | railgate → gatekeeper | `POST /api/v1/settle/precheck` on railgate, artefacts read from the payment-network file, railgate calls gatekeeper and passes `SIGNATURE_INVALID` and `CERT_NOT_FOUND` through, carrying gatekeeper's registry id and audit-entry hash |
 | 11 | `railgateAllowsSettlementWithOwnerSuppliedSignature…` | railgate → gatekeeper | `ALLOWED` through railgate, only with a supplied signature pair |
 
-Local-only configuration used: gatekeeper with mTLS off, the ephemeral receipt signer, the in-memory registry and `gatekeeper.confirmation.issuer-ca-bundle-path` pointing at the harness CA; hsm with `swish.issuance.mock.ca-keystore` pointing at the same CA and the mock signatory-rights registry; railgate with `railgate.payment-network.mode=file` and `allow-insecure-http=true` against the local gatekeeper. The harness CA is a throwaway PKCS12 created with `keytool` for each run.
+Local-only configuration used: gatekeeper with mTLS off, the ephemeral receipt signer, the in-memory registry and `gatekeeper.confirmation.issuer-ca-bundle-path` pointing at the harness CA; hsm with `swish.issuance.mock.ca-keystore` pointing at the same CA and the mock signatory-rights registry; railgate with `railgate.payment-network.mode=file`, `railgate.gatekeeper.allow-insecure-http=true` against the local gatekeeper and `railgate.server.allow-insecure-http=true` for its own listener; hsm with `swish.gatekeeper.allow-insecure-http=true`. These three overrides exist for local runs only: deployed, railgate and hsm refuse to start without TLS. The harness CA is a throwaway PKCS12 created with `keytool` for each run.
 
 ## What is not proven locally, and why
 
-- **hsm path without BankID.** hsm's issuance requires a BankID signature whose `userNonVisibleData` binds the exact request (organisation number, Swish number and CSR hash). That cannot be produced without a BankID signing. To run tests 2–3, sign with BankID for test (hsm's `dev` profile trusts the test root) and supply:
+- **hsm path without BankID.** hsm's issuance requires a BankID signature whose `userNonVisibleData` carries a mandate for the request's organisation number and Swish number (`hsm-mandate:v1;org=…;swish=…;count=1`) and whose visible text names both numbers and the count as "(1)". That cannot be produced without a BankID signing. To run tests 2–3, sign with BankID for test (hsm's `dev` profile trusts the test root) and supply:
 
   ```
   ./run.sh -De2e.bankid.yubico.signature=<file> -De2e.bankid.yubico.ocsp=<file> \

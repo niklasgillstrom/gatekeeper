@@ -90,6 +90,61 @@ public interface ApprovalRegistry {
                            String verificationPrincipal);
 
     /**
+     * The customer and, when there is one, the technical supplier of a
+     * verification. Supplier fields are {@code null} when the customer
+     * holds the key itself.
+     */
+    record Parties(String customerOrganisationNumber, String customerSwishNumber,
+                   String supplierIdentifier, String supplierNumber, String supplierName) {
+
+        /** Only the supplier identifier and name, as before 1.6.0. */
+        public static Parties supplierOnly(String supplierIdentifier, String supplierName) {
+            return new Parties(null, null, supplierIdentifier, null, supplierName);
+        }
+    }
+
+    /**
+     * As {@link #register(String, String, boolean, String, String, String, String, String, String, String)},
+     * recording the customer and the supplier. The two shipped registries
+     * store every field; this default, for other implementations, keeps
+     * only the supplier identifier and name.
+     */
+    default RegistryEntry register(String verificationId,
+                                   String confirmationNonce,
+                                   boolean compliant,
+                                   String publicKeyFingerprint,
+                                   Parties parties,
+                                   String hsmVendor,
+                                   String hsmModel,
+                                   String countryCode,
+                                   String verificationPrincipal) {
+        return register(verificationId, confirmationNonce, compliant, publicKeyFingerprint,
+                parties.supplierIdentifier(), parties.supplierName(), hsmVendor, hsmModel,
+                countryCode, verificationPrincipal);
+    }
+
+    /**
+     * As above, also keeping the submitted request: the attestation evidence
+     * itself, so the supervisor can run the verification again later, and
+     * every field of the audited request digest, so it can show that what it
+     * keeps is what was checked ({@code VerificationService.requestDigestBase64}).
+     * The two shipped registries store it; this default drops it.
+     */
+    default RegistryEntry register(String verificationId,
+                                   String confirmationNonce,
+                                   boolean compliant,
+                                   String publicKeyFingerprint,
+                                   Parties parties,
+                                   eu.gillstrom.gatekeeper.model.VerificationRequest submission,
+                                   String hsmVendor,
+                                   String hsmModel,
+                                   String countryCode,
+                                   String verificationPrincipal) {
+        return register(verificationId, confirmationNonce, compliant, publicKeyFingerprint, parties,
+                hsmVendor, hsmModel, countryCode, verificationPrincipal);
+    }
+
+    /**
      * Convenience overload for callers with no authenticated principal to
      * record (tests, and deployments running the permissive reference
      * filter chain). Equivalent to passing {@code null} as
@@ -213,13 +268,12 @@ public interface ApprovalRegistry {
     /**
      * Find a registry entry by the public-key fingerprint of the certificate.
      *
-     * <p>Used by the settlement-time signature verification endpoint
-     * ({@code POST /api/v1/verify}) to determine whether a settlement-time
-     * signature corresponds to a gatekeeper-audited certificate. The
-     * fingerprint is the canonical SHA-256 of the X.509 SubjectPublicKeyInfo
-     * encoding (DER), upper-case hex, colon-separated — produced by
-     * {@code GatekeeperFingerprintFormatter} or its equivalent at the FE
-     * side.
+     * <p>Not used by the settlement-time signature verification endpoint
+     * ({@code POST /api/v1/verify}), which looks the entry up by the issued
+     * certificate ({@link #findByIssuedCertificate}). The fingerprint is the
+     * canonical SHA-256 of the X.509 SubjectPublicKeyInfo encoding (DER),
+     * lower-case hex, colon-separated, as produced by
+     * {@code eu.gillstrom.gatekeeper.util.Fingerprints}.
      *
      * <p>If multiple entries share the same fingerprint (e.g. after
      * certificate renewal — same key, new cert, new verification), the
@@ -338,8 +392,18 @@ public interface ApprovalRegistry {
         private boolean compliant;
         private String publicKeyFingerprint;
         private String actualPublicKeyFingerprint;
+        private String customerOrganisationNumber;
+        private String customerSwishNumber;
         private String supplierIdentifier;
+        private String supplierNumber;
         private String supplierName;
+        /**
+         * The verification request as submitted: public key, attestation data,
+         * signature and chain, parties. Not secret and kept for the retention
+         * period, so the verification can be repeated, for instance with a
+         * corrected verifier. {@code null} for entries written before 1.6.0.
+         */
+        private eu.gillstrom.gatekeeper.model.VerificationRequest submission;
         private String hsmVendor;
         private String hsmModel;
         private String countryCode;

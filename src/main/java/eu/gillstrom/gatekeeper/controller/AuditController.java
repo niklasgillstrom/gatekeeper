@@ -30,9 +30,10 @@ import java.util.UUID;
  * <p>Exposes the gatekeeper's tamper-evident audit log to authorised
  * supervisory clients. All endpoints are read-only — appends are
  * triggered only by the gatekeeper's own decision-making code paths
- * (verify / confirm / batch-verify) — and all queries operate over the
- * same in-memory snapshot the chain-validator does, so a query result
- * is consistent with {@link AuditLog#verifyChainIntegrity()}.</p>
+ * (verify / confirm / batch-verify). Queries read the in-memory copy of
+ * the log; {@link AuditLog#verifyChainIntegrity()} reads the file back
+ * from disk, so a change made to the file under a running gatekeeper is
+ * reported by the integrity check, not reflected in query results.</p>
  *
  * <p>Endpoints under {@code /v1/audit}:</p>
  * <ul>
@@ -44,9 +45,9 @@ import java.util.UUID;
  *       resource cost of a malicious or careless query.</li>
  *   <li>{@code GET /entity/{principal}} — entries for a given mTLS
  *       principal, compared exactly with the value recorded at append:
- *       the capture group of {@code gatekeeper.security.mtls.principal-regex}
- *       (by default the CN value), or the full subject DN when the regex
- *       does not match. {@code principal} is URL-decoded.</li>
+ *       the value of the subject attribute named by {@code gatekeeper.security.mtls.principal-attribute}
+ *       (by default the CN value). A certificate without exactly one such
+ *       attribute is not authenticated. {@code principal} is URL-decoded.</li>
  *   <li>{@code GET /export?from=...&to=...&inspectionId=...} —
  *       packaged, signed export for a supervisory inspection.</li>
  * </ul>
@@ -117,7 +118,7 @@ public class AuditController {
     @Operation(
         summary = "Audit entries for a given mTLS principal",
         description = "Principal is URL-decoded and compared exactly with the recorded "
-                + "principal: the value captured by gatekeeper.security.mtls.principal-regex "
+                + "principal: the value of the subject attribute named by gatekeeper.security.mtls.principal-attribute "
                 + "(by default the CN value, e.g. swishTL), not the full DN.")
     public ResponseEntity<List<AuditEntry>> findByEntity(@PathVariable String principal) {
         String decoded = URLDecoder.decode(principal, StandardCharsets.UTF_8);
