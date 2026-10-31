@@ -212,6 +212,120 @@ public interface ApprovalRegistry {
         }
     }
 
+    /**
+     * Change the status of a confirmed entry for a key-lifecycle event
+     * ({@code ROTATED}, {@code REVOKED}, {@code DECOMMISSIONED}; see
+     * {@code KeyLifecycleService}).
+     *
+     * <p>{@code target} must be {@link RegistryStatus#SUPERSEDED},
+     * {@link RegistryStatus#REVOKED} or {@link RegistryStatus#DECOMMISSIONED};
+     * anything else is an {@link IllegalArgumentException}. The change is
+     * applied only when {@link #isAllowedStatusChange} allows it from the
+     * entry's current status; the check and the change are one atomic step,
+     * so two concurrent events cannot both apply from the same status.</p>
+     *
+     * <p>The file-backed registry journals an applied change as a
+     * {@code STATUS_CHANGE} operation before applying it in memory, and
+     * replays it at start-up. A refused change is not journalled: nothing
+     * changed. Both outcomes are recorded in the audit log by the caller.</p>
+     *
+     * <p>The default throws {@link UnsupportedOperationException}, so that an
+     * implementation that does not support status changes cannot silently
+     * report one as applied.</p>
+     *
+     * @param reason free-text reason supplied with the event, stored on the entry
+     * @param successorVerificationId for {@code SUPERSEDED}, the verification
+     *     of the key that replaces this one; {@code null} otherwise or when
+     *     not supplied
+     */
+    default StatusChange changeStatus(String verificationId, RegistryStatus target, String reason,
+                                      String successorVerificationId) {
+        throw new UnsupportedOperationException(
+                getClass().getName() + " does not support registry status changes");
+    }
+
+    /**
+     * Whether a key-lifecycle event may move an entry from {@code from} to
+     * {@code to}. Only a confirmed issuance ({@code VERIFIED_AND_ISSUED}) has
+     * a key lifecycle; a superseded key may still be revoked or
+     * decommissioned; {@code REVOKED} and {@code DECOMMISSIONED} are final.
+     */
+    static boolean isAllowedStatusChange(RegistryStatus from, RegistryStatus to) {
+        if (to == RegistryStatus.SUPERSEDED) {
+            return from == RegistryStatus.VERIFIED_AND_ISSUED;
+        }
+        if (to == RegistryStatus.REVOKED || to == RegistryStatus.DECOMMISSIONED) {
+            return from == RegistryStatus.VERIFIED_AND_ISSUED || from == RegistryStatus.SUPERSEDED;
+        }
+        return false;
+    }
+
+    /**
+     * Apply an allowed status change to an entry. Shared by both registries
+     * and by journal replay so that they cannot drift apart. The successor
+     * is set only by {@code SUPERSEDED}; a later {@code REVOKED} or
+     * {@code DECOMMISSIONED} keeps the successor recorded at rotation.
+     */
+    static void applyStatusChange(RegistryEntry entry, RegistryStatus target, String changedAt,
+                                  String reason, String successorVerificationId) {
+        entry.setStatus(target);
+        entry.setStatusChangedAt(changedAt);
+        entry.setStatusChangeReason(reason);
+        if (target == RegistryStatus.SUPERSEDED) {
+            entry.setSuccessorVerificationId(successorVerificationId);
+        }
+    }
+
+    /** The three statuses {@link #changeStatus} can set. */
+    static boolean isLifecycleStatus(RegistryStatus status) {
+        return status == RegistryStatus.SUPERSEDED
+                || status == RegistryStatus.REVOKED
+                || status == RegistryStatus.DECOMMISSIONED;
+    }
+
+    /**
+     * Whether an entry's confirmation ended in {@code VERIFIED_AND_ISSUED},
+     * whether or not a later lifecycle event moved it on. {@link #getStats}
+     * counts these as compliant, so that rotating, revoking or
+     * decommissioning a key does not lower a jurisdiction's compliance rate:
+     * the issuance it describes passed the gate.
+     */
+    static boolean wasVerifiedAndIssued(RegistryStatus status) {
+        return status == RegistryStatus.VERIFIED_AND_ISSUED || isLifecycleStatus(status);
+    }
+
+    /**
+     * Outcome of {@link #changeStatus}.
+     *
+     * @param outcome {@code APPLIED}, {@code REFUSED} (transition not allowed
+     *     from the current status) or {@code NOT_FOUND} (no such verificationId)
+     * @param previousStatus the status before the call
+     * @param currentStatus the status after the call (equal to
+     *     {@code previousStatus} unless applied)
+     * @param changedAt ISO-8601 instant of an applied change, else {@code null}
+     */
+    record StatusChange(Outcome outcome, RegistryStatus previousStatus, RegistryStatus currentStatus,
+                        String changedAt) {
+
+        public enum Outcome { APPLIED, REFUSED, NOT_FOUND }
+
+        public static StatusChange notFound() {
+            return new StatusChange(Outcome.NOT_FOUND, null, null, null);
+        }
+
+        public static StatusChange refused(RegistryStatus current) {
+            return new StatusChange(Outcome.REFUSED, current, current, null);
+        }
+
+        public static StatusChange applied(RegistryStatus previous, RegistryStatus current, String changedAt) {
+            return new StatusChange(Outcome.APPLIED, previous, current, changedAt);
+        }
+
+        public boolean isApplied() {
+            return outcome == Outcome.APPLIED;
+        }
+    }
+
     /** Look up a registry entry by verification ID. */
     Optional<RegistryEntry> lookup(String verificationId);
 
@@ -326,7 +440,10 @@ public interface ApprovalRegistry {
         }
     }
 
-    /** Compliance statistics for a given country code. */
+    /**
+     * Compliance statistics for a given country code. {@code compliant}
+     * counts entries for which {@link #wasVerifiedAndIssued} holds.
+     */
     ComplianceStats getStats(String countryCode);
 
     /** Aggregate compliance statistics. */
@@ -427,5 +544,16 @@ public interface ApprovalRegistry {
         private String issuedCertificatePem;
         private String issuedCertificateSerial;
         private String issuedCertificateIssuerDn;
+        /**
+         * ISO-8601 instant of the latest key-lifecycle status change
+         * ({@code SUPERSEDED}, {@code REVOKED}, {@code DECOMMISSIONED});
+         * {@code null} while the entry has had none. Earlier changes are in
+         * the journal and the audit log, not on the entry.
+         */
+        private String statusChangedAt;
+        /** Free-text reason given with the latest status change. */
+        private String statusChangeReason;
+        /** For {@code SUPERSEDED}: the verificationId of the successor key, when given. */
+        private String successorVerificationId;
     }
 }

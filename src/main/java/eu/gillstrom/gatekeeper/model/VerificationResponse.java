@@ -80,8 +80,10 @@ public class VerificationResponse {
      * EBA's digital signature over this receipt, in Base64 encoding.
      * Computed over the pipe-separated canonical form of
      * {@code ReceiptCanonicalizer} (v3), which covers the decision-relevant
-     * fields; {@code errors}, {@code warnings}, {@code summary} and
-     * {@code signingCertificate} are not part of it. Allows any party to verify
+     * fields; {@code errors}, {@code warnings}, {@code summary},
+     * {@code signingCertificate}, {@code hsmFirmwareVersion},
+     * {@code hsmFipsIndicator} and {@code hsmFipsApprovedMode} are not part of
+     * it. Allows any party to verify
      * that this receipt was issued by EBA and has not been tampered with.
      * 
      * In the reference implementation, this uses a self-signed key pair.
@@ -107,6 +109,19 @@ public class VerificationResponse {
     private String hsmVendor;
     private String hsmModel;
     private String hsmSerialNumber;
+
+    // === Firmware and FIPS mode as attested (Yubico only; not signed) ===
+    //
+    // What the attestation states about the HSM's firmware and FIPS mode: firmware
+    // (OID 1.3.6.1.4.1.41482.4.1), FIPS indicator (.4.10) and FIPS-approved
+    // flag (.4.12), from a Yubico chain that validated to the pinned root,
+    // whether or not the receipt is compliant. Null otherwise and for every
+    // other vendor. They are not part of the canonical form ReceiptCanonicalizer
+    // signs (v3), so the receipt signature does not cover them.
+
+    private String hsmFirmwareVersion;
+    private Integer hsmFipsIndicator;
+    private Boolean hsmFipsApprovedMode;
 
     // === Key Properties ===
 

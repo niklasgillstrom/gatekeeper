@@ -242,10 +242,23 @@ class AppendOnlyFileAuditLogTest {
                 Files.readString(file, StandardCharsets.UTF_8) + "{\"sequenceNumber\":3,\"timesta",
                 StandardCharsets.UTF_8);
 
-        // Reload and verify the corrupt trailer was truncated.
-        AppendOnlyFileAuditLog second = newLog(file);
+        // Reload and verify the corrupt trailer was truncated; the WARN names its line.
+        ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger)
+                org.slf4j.LoggerFactory.getLogger(AppendOnlyFileAuditLog.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+                new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        logger.addAppender(logs);
+        AppendOnlyFileAuditLog second;
+        try {
+            second = newLog(file);
+        } finally {
+            logger.detachAppender(logs);
+        }
         assertThat(second.size()).isEqualTo(2);
         assertThat(second.verifyChainIntegrity()).isTrue();
+        assertThat(logs.list).map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .anySatisfy(m -> assertThat(m).contains("trailing line 3 is not parseable"));
     }
 
     // ---------------------------------------------------------------------

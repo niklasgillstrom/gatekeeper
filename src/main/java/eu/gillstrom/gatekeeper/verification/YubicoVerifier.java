@@ -3,6 +3,7 @@ package eu.gillstrom.gatekeeper.verification;
 import org.bouncycastle.asn1.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.model.HsmVendor;
 
@@ -31,19 +32,24 @@ public class YubicoVerifier implements HsmAttestationVerifier {
 
     private static final Logger log = LoggerFactory.getLogger(YubicoVerifier.class);
 
-    // Yubico YubiHSM Root CA — genuine vendor-issued root.
-    //
-    // Source: https://developers.yubico.com/YubiHSM2/Concepts/yubihsm2-attest-ca-crt.pem
-    // Subject:  CN=Yubico YubiHSM Root CA
-    // Issuer:   CN=Yubico YubiHSM Root CA (self-signed)
-    // Validity: 2017-01-01 to 2071-10-05 (UTC)
-    // SHA-256:  09:4A:3A:C4:93:C2:BD:CD:65:A5:4B:DF:40:19:0F:52:
-    //           BB:03:F7:15:63:97:A3:FC:69:D8:AA:9A:39:2F:B7:24
+    // Pinned trust anchor
+    //   Subject:  CN=Yubico YubiHSM Root CA
+    //             (RFC 2253; self-signed)
+    //   SHA-256:  09:4A:3A:C4:93:C2:BD:CD:65:A5:4B:DF:40:19:0F:52:
+    //             BB:03:F7:15:63:97:A3:FC:69:D8:AA:9A:39:2F:B7:24
+    //             (SHA-256 of the DER certificate)
+    //   Validity: 2017-01-01T00:00:00Z to 2071-10-05T00:00:00Z
+    //   Source:   https://developers.yubico.com/YubiHSM2/Concepts/yubihsm2-attest-ca-crt.pem
+    //   Confirmed: the attestation from the reference YubiHSM 2 FIPS
+    //             (serial 20783176; the real fixture in these repositories)
+    //             validates under it.
+    //   Pinned as: the PKIX trust anchor (whole certificate).
+    //   Checked by TrustAnchorPinningTest; changing the constant fails the build.
     //
     // Operators deploying this verifier should re-verify the SHA-256 fingerprint
     // against an authoritative Yubico source before relying on it, and rotate
     // according to the operator's key-management policy.
-    private static final String YUBICO_ROOT_CA = """
+    static final String YUBICO_ROOT_CA = """
             -----BEGIN CERTIFICATE-----
             MIIFBzCCAu+gAwIBAgIEHM6S6zANBgkqhkiG9w0BAQsFADAhMR8wHQYDVQQDDBZZ
             dWJpY28gWXViaUhTTSBSb290IENBMCAXDTE3MDEwMTAwMDAwMFoYDzIwNzExMDA1
@@ -82,6 +88,16 @@ public class YubicoVerifier implements HsmAttestationVerifier {
     private static final String CAPABILITIES_OID = YUBICO_BASE_OID + ".5";
     private static final String OBJECT_ID_OID = YUBICO_BASE_OID + ".6";
     private static final String LABEL_OID = YUBICO_BASE_OID + ".9";
+    /**
+     * "FIPS", an INTEGER. Yubico's OID reference
+     * (docs.yubico.com/hardware/oid/oid-product-arc.html) lists it for the
+     * generated and the pre-loaded attestation certificate. The reference
+     * YubiHSM 2 (firmware 2.2.0) carries it only on the device attestation
+     * certificate, with the value 5. It is reported, not interpreted.
+     */
+    static final String FIPS_INDICATOR_OID = YUBICO_BASE_OID + ".10";
+    /** "FIPS-approved", a BOOLEAN: TRUE if FIPS mode is enabled (same reference). */
+    static final String FIPS_APPROVED_OID = YUBICO_BASE_OID + ".12";
 
     // Capabilities bits that indicate exportability
     private static final int EXPORT_WRAPPED_BIT = 12;
@@ -90,11 +106,35 @@ public class YubicoVerifier implements HsmAttestationVerifier {
     private final X509Certificate rootCa;
 
     public YubicoVerifier() {
+        this(pinnedRoot());
+    }
+
+    /**
+     * Anchored at the Yubico root in {@code anchors}: the pinned one, or the
+     * operator's replacement ({@link TrustAnchors#YUBICO}).
+     */
+    @Autowired
+    public YubicoVerifier(TrustAnchors anchors) {
+        this(anchors.yubicoRoot());
+    }
+
+    /** For tests: another root. */
+    YubicoVerifier(X509Certificate rootCa) {
+        this.rootCa = rootCa;
+    }
+
+    /** The root this verifier anchors its chains at. */
+    X509Certificate rootCa() {
+        return rootCa;
+    }
+
+    /** The pinned root, parsed from {@link #YUBICO_ROOT_CA}. */
+    static X509Certificate pinnedRoot() {
         try {
             CertificateFactory cf = CertificateFactory.getInstance("X.509");
             ByteArrayInputStream is = new ByteArrayInputStream(
                     YUBICO_ROOT_CA.trim().getBytes(StandardCharsets.UTF_8));
-            this.rootCa = (X509Certificate) cf.generateCertificate(is);
+            return (X509Certificate) cf.generateCertificate(is);
         } catch (Exception e) {
             // Fail-closed: if the Yubico root CA cannot be loaded, the verifier cannot
             // provide its security guarantees. Refuse to construct the bean so the
@@ -103,6 +143,11 @@ public class YubicoVerifier implements HsmAttestationVerifier {
             throw new IllegalStateException(
                     "Failed to load Yubico root CA — YubicoVerifier cannot be constructed", e);
         }
+    }
+
+    /** The root CA attestation chains are validated against. */
+    public X509Certificate getRootCertificate() {
+        return rootCa;
     }
 
     @Override
@@ -161,6 +206,14 @@ public class YubicoVerifier implements HsmAttestationVerifier {
 
             // Extract attributes from OID extensions
             extractYubicoAttributes(attestCert, result);
+
+            // What the attestation states about firmware and FIPS mode: the FIPS
+            // indicator and the FIPS-approved flag, from the key certificate,
+            // else from the device attestation certificate (chain[1]).
+            // Reported only: absent or not, neither changes valid. A policy
+            // that requires FIPS-approved mode is applied by the caller.
+            result.setFipsIndicator(fipsIndicator(chain));
+            result.setFipsApprovedMode(fipsApprovedMode(chain));
 
             // Extract device serial from device cert
             if (chain.length > 1) {
@@ -312,6 +365,61 @@ public class YubicoVerifier implements HsmAttestationVerifier {
         }
     }
 
+    /**
+     * The FIPS indicator ({@code 41482.4.10}, INTEGER) of the key certificate,
+     * else of {@code chain[1]}; null when neither carries a well-formed one.
+     */
+    static Integer fipsIndicator(X509Certificate[] chain) {
+        for (int i = 0; i < Math.min(2, chain.length); i++) {
+            ASN1Primitive value = extensionContent(chain[i], FIPS_INDICATOR_OID);
+            if (value instanceof ASN1Integer n && n.getValue().bitLength() < 32) {
+                return n.getValue().intValue();
+            }
+            if (value != null) {
+                log.warn("Yubico FIPS indicator ({}) in certificate {} is not an int-sized INTEGER; ignored",
+                        FIPS_INDICATOR_OID, i);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The FIPS-approved flag ({@code 41482.4.12}, BOOLEAN) of the key
+     * certificate, else of {@code chain[1]}; null when neither carries a
+     * well-formed one.
+     */
+    static Boolean fipsApprovedMode(X509Certificate[] chain) {
+        for (int i = 0; i < Math.min(2, chain.length); i++) {
+            ASN1Primitive value = extensionContent(chain[i], FIPS_APPROVED_OID);
+            if (value instanceof ASN1Boolean b) {
+                return b.isTrue();
+            }
+            if (value != null) {
+                log.warn("Yubico FIPS-approved flag ({}) in certificate {} is not a BOOLEAN; ignored",
+                        FIPS_APPROVED_OID, i);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The DER value inside an extension's OCTET STRING, or null when the
+     * certificate does not carry the extension. A value that is not exactly one
+     * DER object is reported as a non-null, unrecognised placeholder so that the
+     * caller ignores it instead of reading a prefix.
+     */
+    private static ASN1Primitive extensionContent(X509Certificate cert, String oid) {
+        byte[] ext = cert.getExtensionValue(oid);
+        if (ext == null) {
+            return null;
+        }
+        try {
+            return ASN1Primitive.fromByteArray(ASN1OctetString.getInstance(ext).getOctets());
+        } catch (Exception e) {
+            return DERNull.INSTANCE;
+        }
+    }
+
     static long parseCapabilities(byte[] capBytes) {
         long caps = 0;
         for (byte b : capBytes) {
@@ -371,6 +479,8 @@ public class YubicoVerifier implements HsmAttestationVerifier {
         private boolean publicKeyMatch;
         private String deviceSerial;
         private String firmware;
+        private Integer fipsIndicator;
+        private Boolean fipsApprovedMode;
         private String keyLabel;
         private int keyId;
         private boolean generated;
@@ -422,6 +532,24 @@ public class YubicoVerifier implements HsmAttestationVerifier {
 
         public void setFirmware(String firmware) {
             this.firmware = firmware;
+        }
+
+        /** {@code 41482.4.10} as found (key certificate, else chain[1]); null if absent. */
+        public Integer getFipsIndicator() {
+            return fipsIndicator;
+        }
+
+        public void setFipsIndicator(Integer fipsIndicator) {
+            this.fipsIndicator = fipsIndicator;
+        }
+
+        /** {@code 41482.4.12} as found (key certificate, else chain[1]); null if absent. */
+        public Boolean getFipsApprovedMode() {
+            return fipsApprovedMode;
+        }
+
+        public void setFipsApprovedMode(Boolean fipsApprovedMode) {
+            this.fipsApprovedMode = fipsApprovedMode;
         }
 
         public String getKeyLabel() {

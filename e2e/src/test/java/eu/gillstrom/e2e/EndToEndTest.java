@@ -82,8 +82,12 @@ class EndToEndTest {
     private ServiceProcess railgate;
     private LocalIssuerCa issuerCa;
     private X509Certificate gatekeeperSigningCertificate;
+    /** publicKeyFingerprintHex of the ACTIVE entry of GET /v1/gatekeeper/keys. */
+    private String gatekeeperKeyFingerprintHex;
     private String railgateAuthorization;
     private Path paymentNetworkFile;
+    /** A certificate issued for the positive-vendor key and then REVOKED (test 13). */
+    private Issued revoked;
 
     private record Issued(String label, String vendor, X509Certificate certificate, String verificationId) {
 
@@ -158,6 +162,10 @@ class EndToEndTest {
         paymentNetworkFile = E2eConfig.WORK_DIR.resolve("railgate").resolve("payment-network.tsv");
         Files.createDirectories(paymentNetworkFile.getParent());
         Files.writeString(paymentNetworkFile, "", StandardCharsets.UTF_8);
+        // railgate verifies gatekeeper's signed verdicts under the certificate
+        // gatekeeper publishes at GET /v1/gatekeeper/keys, as hsm is given it above.
+        Path railgateTrustedKeys = paymentNetworkFile.getParent().resolve("gatekeeper-trusted-keys.pem");
+        Files.writeString(railgateTrustedKeys, trustedKeyPem, StandardCharsets.UTF_8);
 
         String railgatePassword = UUID.randomUUID().toString();
         railgateAuthorization = Http.basicAuth(RAILGATE_USER, railgatePassword);
@@ -169,6 +177,10 @@ class EndToEndTest {
                 "--railgate.server.allow-insecure-http=true",
                 "--railgate.payment-network.mode=file",
                 "--railgate.payment-network.file=" + paymentNetworkFile,
+                // A signed verdict is required (also railgate's default) and
+                // verified under gatekeeper's published signing certificate.
+                "--railgate.gatekeeper.require-signed-verdict=true",
+                "--railgate.gatekeeper.trusted-keys=file:" + railgateTrustedKeys,
                 "--spring.security.user.name=" + RAILGATE_USER,
                 "--spring.security.user.password=" + railgatePassword)));
 
@@ -452,6 +464,8 @@ class EndToEndTest {
                     entry.label() + ": railgate did not carry gatekeeper's registry id: " + response.body()));
             checks.add(() -> assertTrue(response.json().path("auditEntryHashHex").asText("").matches("^[0-9a-f]{64}$"),
                     entry.label() + ": railgate did not carry gatekeeper's audit-entry hash: " + response.body()));
+            checks.add(() -> assertEquals("VERIFIED", response.json().path("verdictSignature").asText(),
+                    entry.label() + ": railgate did not record a verified signed verdict: " + response.body()));
         }
         String unknownSerial = new BigInteger(159, RANDOM).setBit(158).toString(16);
         String unknownReference = recordPayment(unknownSerial,
@@ -460,6 +474,7 @@ class EndToEndTest {
         Http.Response unknown = precheck(unknownReference);
         checks.add(() -> assertEquals(403, unknown.status(), unknown.body()));
         checks.add(() -> assertEquals("CERT_NOT_FOUND", unknown.json().path("reasonCode").asText(), unknown.body()));
+        checks.add(() -> assertEquals("VERIFIED", unknown.json().path("verdictSignature").asText(), unknown.body()));
         assertAll(checks);
     }
 
@@ -479,7 +494,159 @@ class EndToEndTest {
         assertAll(
                 () -> assertEquals(200, response.status(), response.body()),
                 () -> assertTrue(response.json().path("allow").asBoolean(false), response.body()),
-                () -> assertEquals("ALLOWED", response.json().path("reasonCode").asText(), response.body()));
+                () -> assertEquals("ALLOWED", response.json().path("reasonCode").asText(), response.body()),
+                () -> assertEquals("VERIFIED", response.json().path("verdictSignature").asText(), response.body()));
+    }
+
+    @Test
+    @Order(12)
+    void railgateVerifiesVerdictsUnderTheKeyGatekeeperPublishesWithOneFingerprint() throws Exception {
+        assertFalse(issued.isEmpty(), "No certificate reached VERIFIED_AND_ISSUED at Step 7.");
+        String computed = HexFormat.of().formatHex(
+                Pem.sha256(gatekeeperSigningCertificate.getPublicKey().getEncoded()));
+        Issued entry = issued.values().iterator().next();
+        JsonNode verdict = settle(entry.serialHex(), entry.issuerDn(), randomDigestHex(), randomSignature(entry));
+        String railgateLog = railgate.log();
+        assertAll(
+                () -> assertTrue(gatekeeperKeyFingerprintHex != null
+                                && gatekeeperKeyFingerprintHex.matches("^[0-9a-f]{64}$"),
+                        "GET /v1/gatekeeper/keys publicKeyFingerprintHex: " + gatekeeperKeyFingerprintHex),
+                () -> assertEquals(computed, gatekeeperKeyFingerprintHex,
+                        "/keys publicKeyFingerprintHex is not the lowercase hex SHA-256 of the DER "
+                                + "SubjectPublicKeyInfo of the published certificate"),
+                () -> assertEquals(gatekeeperKeyFingerprintHex, verdict.path("signingKeyFingerprintHex").asText(),
+                        "the verdict names its key by another fingerprint than /keys: " + verdict),
+                () -> assertFalse(verdict.path("verdictSignatureBase64").asText("").isBlank(), verdict.toString()),
+                () -> assertFalse(verdict.path("verdictSignatureAlgorithm").asText("").isBlank(), verdict.toString()),
+                () -> assertFalse(verdict.path("verifiedAt").asText("").isBlank(), verdict.toString()),
+                () -> assertTrue(railgateLog.contains("trusted gatekeeper key fingerprints: ["
+                                + gatekeeperKeyFingerprintHex + "]"),
+                        "railgate did not compute the /keys fingerprint " + gatekeeperKeyFingerprintHex
+                                + " for the certificate in railgate.gatekeeper.trusted-keys; see "
+                                + railgate.logFile()));
+    }
+
+    @Test
+    @Order(13)
+    void lifecycleRevocationIsAppliedAndRecordedInTheKeysAuditChain() throws Exception {
+        String vendor = positiveVendor();
+        Fixture fixture = fixtures.get(vendor);
+        assertNotNull(fixture, "No fixture for vendor " + vendor);
+
+        // Steps 2-7 once more for the same attested key, with a certificate of
+        // its own, so that revoking it leaves the certificates of tests 4-11 alone.
+        Http.Response verify = Http.postJson(
+                gatekeeper.uri("/v1/attestation/" + COUNTRY + "/verify"), fixture.gatekeeperVerifyRequest(), null);
+        assertEquals(200, verify.status(), verify.body());
+        JsonNode receipt = verify.json();
+        assertTrue(receipt.path("compliant").asBoolean(false), receipt.toString());
+        String verificationId = receipt.path("verificationId").asText();
+        X509Certificate leaf = issuerCa.issue("revoked-" + vendor, fixture.csrPem());
+        ObjectNode confirmation = Http.JSON.createObjectNode();
+        confirmation.put("verificationId", verificationId);
+        confirmation.put("confirmationNonce", receipt.path("confirmationNonce").asText());
+        confirmation.put("issued", true);
+        confirmation.put("signingCertificatePem", Pem.of(leaf));
+        confirmation.put("timestamp", Instant.now().toString());
+        confirmation.put("swishNumber", Fixture.SWISH_NUMBER);
+        confirmation.put("organisationNumber", Fixture.ORGANISATION_NUMBER);
+        Http.Response confirm = Http.postJson(
+                gatekeeper.uri("/v1/attestation/" + COUNTRY + "/confirm"), confirmation, null);
+        assertEquals(200, confirm.status(), confirm.body());
+        assertEquals("VERIFIED_AND_ISSUED", confirm.json().path("registryStatus").asText(), confirm.body());
+        Issued target = new Issued("revoked-" + vendor, vendor, leaf, verificationId);
+
+        ObjectNode event = Http.JSON.createObjectNode();
+        event.put("eventType", "REVOKED");
+        event.put("certSerial", target.serialHex());
+        event.put("issuerDn", target.issuerDn());
+        event.put("reason", "e2e: revocation drill");
+        Http.Response response = Http.postJson(
+                gatekeeper.uri("/v1/attestation/" + COUNTRY + "/lifecycle"), event, null);
+        JsonNode change = response.json();
+        assertAll(
+                () -> assertEquals(200, response.status(), response.body()),
+                () -> assertEquals("OK", change.path("reason").asText(), response.body()),
+                () -> assertTrue(change.path("applied").asBoolean(false), response.body()),
+                () -> assertEquals(verificationId, change.path("verificationId").asText(), response.body()),
+                () -> assertEquals("VERIFIED_AND_ISSUED", change.path("previousStatus").asText(), response.body()),
+                () -> assertEquals("REVOKED", change.path("registryStatus").asText(), response.body()),
+                () -> assertTrue(change.path("auditEntryHashHex").asText("").matches("^[0-9a-f]{64}$"),
+                        response.body()));
+
+        // The REVOKED audit entry carries the key, the certificate and the
+        // resulting status, and continues the key's per-key chain from CONFIRM.
+        Http.Response trail = Http.get(gatekeeper.uri("/v1/audit/entity/reference-anonymous"), null);
+        assertEquals(200, trail.status(), trail.body());
+        List<JsonNode> ofKey = new ArrayList<>();
+        for (JsonNode e : trail.json()) {
+            if (fixture.expectedFingerprint().equals(e.path("keyFingerprintHex").asText())) {
+                ofKey.add(e);
+            }
+        }
+        ofKey.sort(Comparator.comparingLong(e -> e.path("sequenceNumber").asLong()));
+        assertTrue(ofKey.size() >= 3, "too few audit entries for the key: " + ofKey);
+        JsonNode revokedEntry = ofKey.get(ofKey.size() - 1);
+        JsonNode previous = ofKey.get(ofKey.size() - 2);
+        assertAll(
+                () -> assertEquals(change.path("auditEntryHashHex").asText(),
+                        revokedEntry.path("thisEntryHashHex").asText(), revokedEntry.toString()),
+                () -> assertEquals("REVOKED", revokedEntry.path("operation").asText(), revokedEntry.toString()),
+                () -> assertEquals("v2", revokedEntry.path("canonicalVersion").asText(), revokedEntry.toString()),
+                () -> assertEquals(target.serialHex(), revokedEntry.path("certSerialHex").asText(),
+                        revokedEntry.toString()),
+                () -> assertEquals(target.issuerDn(), revokedEntry.path("certIssuerDn").asText(),
+                        revokedEntry.toString()),
+                () -> assertEquals("REVOKED", revokedEntry.path("registryStatus").asText(), revokedEntry.toString()),
+                () -> assertEquals("CONFIRM", previous.path("operation").asText(), previous.toString()),
+                () -> assertEquals(verificationId, previous.path("verificationId").asText(), previous.toString()),
+                () -> assertEquals(previous.path("thisEntryHashHex").asText(),
+                        revokedEntry.path("prevKeyEntryHashHex").asText(), revokedEntry.toString()));
+
+        // Gatekeeper checks the settlement signature before the registry
+        // status, so with a signature that does not verify the revoked
+        // certificate still answers SIGNATURE_INVALID (CERT_REVOKED: test 14).
+        JsonNode unsigned = settle(target.serialHex(), target.issuerDn(), randomDigestHex(), randomSignature(target));
+        assertEquals("SIGNATURE_INVALID", unsigned.path("reason").asText(), unsigned.toString());
+        revoked = target;
+    }
+
+    @Test
+    @Order(14)
+    void settlementForARevokedCertificateIsCertRevokedDirectlyAndThroughRailgate() throws Exception {
+        assertNotNull(revoked, "test 13 did not issue and revoke a certificate");
+        Optional<SignedDigest> supplied = suppliedSignedDigest();
+        if (supplied.isEmpty()) {
+            Assumptions.abort("CERT_REVOKED needs a settlement signature that verifies under the attested key: "
+                    + "gatekeeper checks the signature before the registry status, so a signature that does not "
+                    + "verify gets SIGNATURE_INVALID for a revoked certificate (asserted in test 13). The fixtures "
+                    + "contain no private key; supply -De2e.positive.file=<json> "
+                    + "[-De2e.positive.vendor=securosys|yubico]. See README.md.");
+        }
+        Signature local = Signature.getInstance("SHA512withRSA");
+        local.initVerify(revoked.certificate().getPublicKey());
+        local.update(HexFormat.of().parseHex(supplied.get().digestHex()));
+        assertTrue(local.verify(Base64.getDecoder().decode(supplied.get().signatureBase64())),
+                "The supplied pair does not verify as SHA512withRSA under the attested " + revoked.vendor()
+                        + " key; gatekeeper would answer SIGNATURE_INVALID.");
+
+        JsonNode direct = settle(revoked.serialHex(), revoked.issuerDn(),
+                supplied.get().digestHex(), supplied.get().signatureBase64());
+        String reference = recordPayment(revoked.serialHex(), revoked.issuerDn(),
+                supplied.get().digestHex(), supplied.get().signatureBase64());
+        Http.Response viaRailgate = precheck(reference);
+        assertAll(
+                () -> assertEquals("CERT_REVOKED", direct.path("reason").asText(), direct.toString()),
+                () -> assertTrue(direct.path("signatureValid").asBoolean(false), direct.toString()),
+                () -> assertFalse(direct.path("compliant").asBoolean(true), direct.toString()),
+                () -> assertEquals(revoked.verificationId(), direct.path("auditEntryId").asText(), direct.toString()),
+                () -> assertEquals(403, viaRailgate.status(), viaRailgate.body()),
+                () -> assertFalse(viaRailgate.json().path("allow").asBoolean(true), viaRailgate.body()),
+                () -> assertEquals("CERT_REVOKED", viaRailgate.json().path("reasonCode").asText(), viaRailgate.body()),
+                () -> assertEquals("VERIFIED", viaRailgate.json().path("verdictSignature").asText(),
+                        viaRailgate.body()),
+                () -> assertEquals(revoked.verificationId(), viaRailgate.json().path("auditEntryId").asText(),
+                        viaRailgate.body()));
     }
 
     private synchronized String recordPayment(String certSerial, String issuerDn, String digestHex,
@@ -519,6 +686,7 @@ class EndToEndTest {
         }
         for (JsonNode entry : keys.json()) {
             if ("ACTIVE".equals(entry.path("status").asText())) {
+                gatekeeperKeyFingerprintHex = entry.path("publicKeyFingerprintHex").asText();
                 return entry.path("certificatePem").asText();
             }
         }

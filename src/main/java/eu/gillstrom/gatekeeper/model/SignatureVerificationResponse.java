@@ -29,7 +29,25 @@ import lombok.NoArgsConstructor;
  *       is outside its validity period</li>
  *   <li>{@code MALFORMED_INPUT} — request fields could not be parsed</li>
  *   <li>{@code ALGORITHM_NOT_SUPPORTED} — algorithm parameter unrecognised</li>
+ *   <li>{@code CERT_SUPERSEDED}, {@code CERT_REVOKED},
+ *       {@code CERT_DECOMMISSIONED} — the signature verifies, but a key
+ *       lifecycle event ({@code ROTATED}, {@code REVOKED},
+ *       {@code DECOMMISSIONED}) has moved the certificate's registry entry
+ *       out of {@code VERIFIED_AND_ISSUED}</li>
  * </ul>
+ *
+ * <h2>Signed verdict</h2>
+ *
+ * <p>{@code verdictSignatureBase64} is the gatekeeper's signature, made with
+ * the active {@code ReceiptSigner}, over
+ * {@link eu.gillstrom.gatekeeper.signing.SettlementVerdictCanonicalizer}
+ * applied to {@code verifiedAt}, the request's {@code certSerial},
+ * {@code issuerDn} and {@code digestHex}, and this response's
+ * {@code signatureValid}, {@code compliant}, {@code reason},
+ * {@code auditEntryId} and {@code auditEntryHashHex}. Every response is
+ * signed, denials included, except one whose request {@code certSerial},
+ * {@code issuerDn} or {@code digestHex} cannot be normalised: then the four
+ * verdict fields are {@code null}.</p>
  */
 @Data
 @Builder
@@ -46,4 +64,24 @@ public class SignatureVerificationResponse {
     private String reason;
 
     private String auditEntryHashHex;
+
+    /**
+     * {@link java.time.Instant#toString()} of the verification instant,
+     * truncated to milliseconds. Part of the signed verdict.
+     */
+    private String verifiedAt;
+
+    /** Base64 signature over the canonical verdict (see class javadoc). */
+    private String verdictSignatureBase64;
+
+    /** JCA name of the signature algorithm, as {@code ReceiptSigner.getSignatureAlgorithm()}. */
+    private String verdictSignatureAlgorithm;
+
+    /**
+     * Lower-case hex SHA-256 fingerprint of the signing key, in the form
+     * {@code GET /v1/gatekeeper/keys} publishes as
+     * {@code publicKeyFingerprintHex} (computed over the DER
+     * SubjectPublicKeyInfo of the active signing certificate's public key).
+     */
+    private String signingKeyFingerprintHex;
 }

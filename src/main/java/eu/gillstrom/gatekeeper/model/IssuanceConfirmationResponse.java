@@ -86,6 +86,24 @@ public class IssuanceConfirmationResponse {
         ANOMALY_PUBLIC_KEY_MISMATCH,
         /** ANOMALY: Confirmation received for unknown verification ID. */
         ANOMALY_UNKNOWN_VERIFICATION,
-        ANOMALY_NONCE_MISMATCH
+        ANOMALY_NONCE_MISMATCH,
+        /**
+         * Key lifecycle (since the lifecycle endpoint): the issued
+         * certificate was rotated out by a {@code ROTATED} event. Reached only
+         * from {@link #VERIFIED_AND_ISSUED}. A confirmation never produces it.
+         */
+        SUPERSEDED,
+        /**
+         * Key lifecycle: the issued certificate was revoked by a
+         * {@code REVOKED} event. Reached from {@link #VERIFIED_AND_ISSUED} or
+         * {@link #SUPERSEDED}; final.
+         */
+        REVOKED,
+        /**
+         * Key lifecycle: the key was taken out of service by a
+         * {@code DECOMMISSIONED} event. Reached from
+         * {@link #VERIFIED_AND_ISSUED} or {@link #SUPERSEDED}; final.
+         */
+        DECOMMISSIONED
     }
 }

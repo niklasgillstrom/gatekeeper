@@ -151,8 +151,34 @@ public final class MarvellAttestation {
      * Marvell LiquidSecurity root, reissued 2024-07-25 to 2034-07-23 with the
      * same key as the 2015 root this repository pinned before. Copied from
      * {@code MARVELL_HSM_ROOT_CERTIFICATE} in Microsoft's validator.
-     * SHA-256 23:01:43:DF:00:E0:B4:52:74:3E:06:8A:5B:3F:C0:8D:F8:F0:6C:EF:C4:85:4E:A6:27:AE:B7:EB:D7:0E:E2:F4
      */
+    // Pinned trust anchor
+    //   Subject:  CN=localca.liquidsecurity.cavium.com,OU=LiquidSecurity,O=Cavium\, Inc.,
+    //             L=San Jose,ST=California,C=US (RFC 2253; self-signed)
+    //   SHA-256:  23:01:43:DF:00:E0:B4:52:74:3E:06:8A:5B:3F:C0:8D:
+    //             F8:F0:6C:EF:C4:85:4E:A6:27:AE:B7:EB:D7:0E:E2:F4
+    //             (SHA-256 of the DER certificate)
+    //   Validity: 2024-07-25T20:29:20Z to 2034-07-23T20:29:20Z
+    //   Source:   https://github.com/Azure/azure-managed-hsm-key-attestation
+    //             (Microsoft's validator, MARVELL_HSM_ROOT_CERTIFICATE; repository
+    //             and commit 02f14d1c as recorded at the top of this file)
+    //   Manufacturer: Marvell, https://www.marvell.com/content/dam/marvell/en/public-collateral/security-solutions/liquid_security_certificate.zip,
+    //             named as MANUFACTURER_CERT_URL in Google's sample
+    //             verify_attestation_chains.py (googleapis/python-kms,
+    //             samples/attestations).
+    //   Confirmed: compared on 2026-10-31, the archive holds another
+    //             certificate for this key (serial C0EAADF434DEDC17, same subject,
+    //             2015-11-19 to 2025-11-16); its key SHA-256,
+    //             78:AD:CB:A1:F3:8B:EE:30:4B:C4:4D:6A:08:65:03:F2:
+    //             94:00:37:D4:B3:D5:8A:1B:F6:6A:32:82:EF:58:CD:41,
+    //             is this constant's.
+    //   Operators: compare the key SHA-256 of the root in the archive with
+    //             the value above; the certificate SHA-256 differs. The archive
+    //             holds no LS2 root, so an override with it alone replaces both
+    //             Marvell roots and drops the LS2 one.
+    //   Pinned as: the issuer a card certificate must name and be signed by
+    //             (marvellRoots(); Azure, Google and Marvell verifiers).
+    //   Checked by TrustAnchorPinningTest; changing the constant fails the build.
     static final String MARVELL_ROOT_PEM = """
             -----BEGIN CERTIFICATE-----
             MIIDvzCCAqegAwIBAgIBADANBgkqhkiG9w0BAQsFADCBkTELMAkGA1UEBhMCVVMx
@@ -181,8 +207,33 @@ public final class MarvellAttestation {
     /**
      * Marvell LiquidSecurity 2 root, 2024-07-22 to 2034-07-20. Copied from
      * {@code MARVELL_LS2_HSM_ROOT_CERTIFICATE} in Microsoft's validator.
-     * SHA-256 17:64:4D:E0:D3:3B:C7:3B:2F:4E:F4:C2:0A:11:F6:C8:CC:1F:72:3A:4C:D8:3E:E6:00:36:1C:BB:24:D8:D2:E5
      */
+    // Pinned trust anchor
+    //   Subject:  CN=cavium-liquidsecurity-ls2,C=US+ST=CA+OU=SSBU+L=SanJose+O=Marvell
+    //             (RFC 2253 as the JDK prints it; one multi-valued RDN; self-signed)
+    //   SHA-256:  17:64:4D:E0:D3:3B:C7:3B:2F:4E:F4:C2:0A:11:F6:C8:
+    //             CC:1F:72:3A:4C:D8:3E:E6:00:36:1C:BB:24:D8:D2:E5
+    //             (SHA-256 of the DER certificate)
+    //   Validity: 2024-07-22T20:34:23Z to 2034-07-20T20:34:23Z
+    //   Source:   https://github.com/Azure/azure-managed-hsm-key-attestation
+    //             (Microsoft's validator, MARVELL_LS2_HSM_ROOT_CERTIFICATE;
+    //             repository and commit 02f14d1c as recorded at the top of this
+    //             file)
+    //   Manufacturer: Marvell, https://www.marvell.com/content/dam/marvell/en/public-collateral/security-solutions/liquid_security_certificate.zip,
+    //             named as MANUFACTURER_CERT_URL in Google's sample
+    //             verify_attestation_chains.py (googleapis/python-kms,
+    //             samples/attestations). Compared on 2026-10-31, the archive at
+    //             that URL holds only the other Marvell root, not this one.
+    //   Confirmed: Marvell shows this root as text on
+    //             https://www.marvell.com/products/security-solutions/nitrox-hs-adapters/liquidsecurity2-certificate-ls2-g-axxx-mi-f-bo.html,
+    //             another certificate for the same key (same subject, serial 0,
+    //             valid 2022-01-07 to 2032-01-05); compared on 2026-10-31, its RSA
+    //             modulus and exponent are this constant's in full.
+    //   Operators: compare the RSA modulus on that page with this
+    //             constant's; the certificate SHA-256 differs.
+    //   Pinned as: the issuer a card certificate must name and be signed by
+    //             (marvellRoots(); Azure, Google and Marvell verifiers).
+    //   Checked by TrustAnchorPinningTest; changing the constant fails the build.
     static final String MARVELL_LS2_ROOT_PEM = """
             -----BEGIN CERTIFICATE-----
             MIIFbTCCA1WgAwIBAgIBADANBgkqhkiG9w0BAQsFADBpMUMwCQYDVQQGEwJVUzAJ

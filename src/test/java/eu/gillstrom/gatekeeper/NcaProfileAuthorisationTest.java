@@ -5,12 +5,14 @@ import jakarta.servlet.Filter;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 
 import java.security.cert.X509Certificate;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -65,6 +67,10 @@ class NcaProfileAuthorisationTest {
             theAuditTrailAndRegistryAreForTheSupervisorOnly();
             verificationAndConfirmationAreForFinancialEntitiesAndTheSupervisor();
             settlementVerificationIsForTheSettlementRailAndTheSupervisor();
+            lifecycleEventsAreForFinancialEntitiesAndTheSupervisor();
+            triangulationIsForTheSupervisorOnly();
+            theAnchorTimestampsArePublicAndTheCoseExportIsForTheSupervisorOnly();
+            everyEndpointAddedWithTheEvidenceChainAndTheLifecycleIsRateLimited();
             anythingElseIsDeniedEvenToTheSupervisor();
             anUnmappedCertificateIsLoggedAndAMappedOneIsNot();
         }
@@ -129,6 +135,74 @@ class NcaProfileAuthorisationTest {
         refused(json(post("/api/v1/verify")), "FE-bank");
         refused(json(post("/api/v1/verify")), "Unmapped-client");
         refused(json(post("/api/v1/verify")), null);
+    }
+
+    private void lifecycleEventsAreForFinancialEntitiesAndTheSupervisor() throws Exception {
+        reached(json(post("/v1/attestation/SE/lifecycle")), "FE-bank");
+        reached(json(post("/v1/attestation/SE/lifecycle")), "FI-supervisor");
+        refused(json(post("/v1/attestation/SE/lifecycle")), "RAIL-riksbank");
+        refused(json(post("/v1/attestation/SE/lifecycle")), "Unmapped-client");
+        refused(json(post("/v1/attestation/SE/lifecycle")), null);
+    }
+
+    private void triangulationIsForTheSupervisorOnly() throws Exception {
+        assertThat(status(post("/v1/triangulation/SE/inquiries"), "FI-supervisor")).isEqualTo(201);
+        reached(get("/v1/triangulation/SE/inquiries/unknown/discrepancies"), "FI-supervisor");
+        for (String cn : new String[] {"FE-bank", "RAIL-riksbank", "Unmapped-client", null}) {
+            refused(post("/v1/triangulation/SE/inquiries"), cn);
+            refused(json(post("/v1/triangulation/SE/inquiries/unknown/bank-reports")), cn);
+            refused(get("/v1/triangulation/SE/inquiries/unknown/discrepancies"), cn);
+        }
+    }
+
+    private MockHttpServletResponse response(MockHttpServletRequestBuilder request, String cn) throws Exception {
+        if (cn != null) {
+            X509Certificate certificate = CERTIFICATES.get(cn);
+            request.with(r -> {
+                r.setAttribute("jakarta.servlet.request.X509Certificate", new X509Certificate[] {certificate});
+                return r;
+            });
+        }
+        return mvc.perform(request).andReturn().getResponse();
+    }
+
+    private static MockHttpServletRequestBuilder coseExport() {
+        Instant now = Instant.now();
+        return get("/v1/audit/export")
+                .param("from", now.minusSeconds(3600).toString())
+                .param("to", now.plusSeconds(60).toString())
+                .param("format", "cose");
+    }
+
+    private void theAnchorTimestampsArePublicAndTheCoseExportIsForTheSupervisorOnly() throws Exception {
+        for (String cn : new String[] {null, "FI-supervisor", "FE-bank", "RAIL-riksbank", "Unmapped-client"}) {
+            assertThat(status(get("/v1/gatekeeper/anchor/timestamps"), cn)).as("anchor timestamps, " + cn)
+                    .isEqualTo(200);
+        }
+        MockHttpServletResponse cose = response(coseExport(), "FI-supervisor");
+        assertThat(cose.getStatus()).isEqualTo(200);
+        assertThat(cose.getContentType()).startsWith("application/cbor-seq");
+        for (String cn : new String[] {"FE-bank", "RAIL-riksbank", "Unmapped-client", null}) {
+            refused(coseExport(), cn);
+        }
+    }
+
+    /**
+     * The rate-limit interceptor is registered for each of these paths in this
+     * profile: a request that passed it carries {@code X-RateLimit-Remaining}.
+     * Which bucket each one draws on is asserted in {@code RateLimitNewEndpointsTest}.
+     */
+    private void everyEndpointAddedWithTheEvidenceChainAndTheLifecycleIsRateLimited() throws Exception {
+        assertThat(response(get("/v1/gatekeeper/anchor/timestamps"), null).getHeader("X-RateLimit-Remaining"))
+                .as("anchor timestamps").isNotNull();
+        assertThat(response(coseExport(), "FI-supervisor").getHeader("X-RateLimit-Remaining"))
+                .as("COSE export").isNotNull();
+        assertThat(response(json(post("/v1/attestation/SE/lifecycle")), "FE-bank")
+                .getHeader("X-RateLimit-Remaining")).as("lifecycle").isNotNull();
+        assertThat(response(post("/v1/triangulation/SE/inquiries"), "FI-supervisor")
+                .getHeader("X-RateLimit-Remaining")).as("triangulation").isNotNull();
+        assertThat(response(get("/v1/triangulation/SE/inquiries/unknown/discrepancies"), "FI-supervisor")
+                .getHeader("X-RateLimit-Remaining")).as("triangulation report").isNotNull();
     }
 
     private void anythingElseIsDeniedEvenToTheSupervisor() throws Exception {

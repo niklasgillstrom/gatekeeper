@@ -40,7 +40,10 @@ import java.util.regex.Pattern;
  * throttle interactive single-entity use. The settlement endpoint
  * ({@code POST /api/v1/verify}) gets its own, much larger bucket because it
  * sits in the payment path and a limit sized for supervisory traffic would
- * stall settlement.</p>
+ * stall settlement. Key-lifecycle events
+ * ({@code POST /v1/attestation/&#x7b;cc&#x7d;/lifecycle}) have their own
+ * {@code lifecycle} bucket, and {@code /v1/triangulation/**} is limited
+ * under the {@code audit} bucket.</p>
  *
  * <h2>Two defects corrected after independent review</h2>
  *
@@ -103,9 +106,17 @@ public class RateLimitInterceptor implements HandlerInterceptor {
     private final BucketStore registryBuckets;
     private final BucketStore settlementBuckets;
     private final BucketStore auditBuckets;
+    private final BucketStore lifecycleBuckets;
 
     private final List<IpAddressMatcher> trustedProxies;
 
+    /**
+     * The interceptor as Spring builds it. The {@code lifecycle} bucket
+     * limits {@code POST /v1/attestation/&#x7b;cc&#x7d;/lifecycle}; it is
+     * separate from {@code verify} because a {@code SIGNED} event may be
+     * reported once per signature, at signing volume rather than issuance
+     * volume.
+     */
     @Autowired
     public RateLimitInterceptor(
             @Value("${gatekeeper.ratelimit.verify.capacity:600}") long verifyCapacity,
@@ -118,20 +129,51 @@ public class RateLimitInterceptor implements HandlerInterceptor {
             @Value("${gatekeeper.ratelimit.settlement.refill-seconds:60}") long settlementRefillSeconds,
             @Value("${gatekeeper.ratelimit.audit.capacity:120}") long auditCapacity,
             @Value("${gatekeeper.ratelimit.audit.refill-seconds:60}") long auditRefillSeconds,
+            @Value("${gatekeeper.ratelimit.lifecycle.capacity:600}") long lifecycleCapacity,
+            @Value("${gatekeeper.ratelimit.lifecycle.refill-seconds:60}") long lifecycleRefillSeconds,
             @Value("${gatekeeper.ratelimit.max-tracked-keys:10000}") int maxTrackedKeys,
             @Value("${gatekeeper.ratelimit.key-idle-seconds:900}") long keyIdleSeconds,
             @Value("${gatekeeper.ratelimit.trusted-proxies:}") String trustedProxyList) {
         this(verifyCapacity, verifyRefillSeconds, batchCapacity, batchRefillSeconds,
                 registryCapacity, registryRefillSeconds, settlementCapacity, settlementRefillSeconds,
-                auditCapacity, auditRefillSeconds, maxTrackedKeys, keyIdleSeconds, trustedProxyList,
-                System::nanoTime);
+                auditCapacity, auditRefillSeconds, lifecycleCapacity, lifecycleRefillSeconds,
+                maxTrackedKeys, keyIdleSeconds, trustedProxyList, System::nanoTime);
     }
 
-    /** As above, with the clock the key sweep reads; tests pass a controllable one. */
+    /**
+     * Without lifecycle limits: the {@code lifecycle} bucket takes the
+     * {@code verify} capacity and refill. For callers that predate the
+     * lifecycle bucket.
+     */
+    public RateLimitInterceptor(long verifyCapacity, long verifyRefillSeconds, long batchCapacity,
+                                long batchRefillSeconds, long registryCapacity, long registryRefillSeconds,
+                                long settlementCapacity, long settlementRefillSeconds, long auditCapacity,
+                                long auditRefillSeconds, int maxTrackedKeys, long keyIdleSeconds,
+                                String trustedProxyList) {
+        this(verifyCapacity, verifyRefillSeconds, batchCapacity, batchRefillSeconds,
+                registryCapacity, registryRefillSeconds, settlementCapacity, settlementRefillSeconds,
+                auditCapacity, auditRefillSeconds, verifyCapacity, verifyRefillSeconds,
+                maxTrackedKeys, keyIdleSeconds, trustedProxyList, System::nanoTime);
+    }
+
+    /** As the previous constructor, with the clock the key sweep reads; tests pass a controllable one. */
     RateLimitInterceptor(long verifyCapacity, long verifyRefillSeconds, long batchCapacity,
                          long batchRefillSeconds, long registryCapacity, long registryRefillSeconds,
                          long settlementCapacity, long settlementRefillSeconds, long auditCapacity,
                          long auditRefillSeconds, int maxTrackedKeys, long keyIdleSeconds,
+                         String trustedProxyList, LongSupplier nanoClock) {
+        this(verifyCapacity, verifyRefillSeconds, batchCapacity, batchRefillSeconds,
+                registryCapacity, registryRefillSeconds, settlementCapacity, settlementRefillSeconds,
+                auditCapacity, auditRefillSeconds, verifyCapacity, verifyRefillSeconds,
+                maxTrackedKeys, keyIdleSeconds, trustedProxyList, nanoClock);
+    }
+
+    /** Every limit, and the clock the key sweep reads. */
+    RateLimitInterceptor(long verifyCapacity, long verifyRefillSeconds, long batchCapacity,
+                         long batchRefillSeconds, long registryCapacity, long registryRefillSeconds,
+                         long settlementCapacity, long settlementRefillSeconds, long auditCapacity,
+                         long auditRefillSeconds, long lifecycleCapacity, long lifecycleRefillSeconds,
+                         int maxTrackedKeys, long keyIdleSeconds,
                          String trustedProxyList, LongSupplier nanoClock) {
 
         this.verifyBuckets = new BucketStore("verify", verifyCapacity,
@@ -144,17 +186,20 @@ public class RateLimitInterceptor implements HandlerInterceptor {
                 Duration.ofSeconds(settlementRefillSeconds), maxTrackedKeys, keyIdleSeconds, nanoClock);
         this.auditBuckets = new BucketStore("audit", auditCapacity,
                 Duration.ofSeconds(auditRefillSeconds), maxTrackedKeys, keyIdleSeconds, nanoClock);
+        this.lifecycleBuckets = new BucketStore("lifecycle", lifecycleCapacity,
+                Duration.ofSeconds(lifecycleRefillSeconds), maxTrackedKeys, keyIdleSeconds, nanoClock);
 
         this.trustedProxies = parseTrustedProxies(trustedProxyList);
 
         log.info("RateLimitInterceptor initialised: verify={}/{}s, batch={}/{}s, registry={}/{}s, "
-                + "settlement={}/{}s, audit={}/{}s; maxTrackedKeys={}, keyIdleSeconds={}, "
+                + "settlement={}/{}s, audit={}/{}s, lifecycle={}/{}s; maxTrackedKeys={}, keyIdleSeconds={}, "
                 + "trustedProxies={}",
                 verifyCapacity, verifyRefillSeconds,
                 batchCapacity, batchRefillSeconds,
                 registryCapacity, registryRefillSeconds,
                 settlementCapacity, settlementRefillSeconds,
                 auditCapacity, auditRefillSeconds,
+                lifecycleCapacity, lifecycleRefillSeconds,
                 maxTrackedKeys, keyIdleSeconds,
                 trustedProxies.isEmpty() ? "(none — X-Forwarded-For ignored)" : trustedProxies);
     }
@@ -348,12 +393,20 @@ public class RateLimitInterceptor implements HandlerInterceptor {
         if (path.startsWith("/v1/audit")) {
             return auditBuckets;
         }
+        if (path.startsWith("/v1/triangulation")) {
+            // Supervisory inquiries. A discrepancy report reads the
+            // jurisdiction's registry, signs a report and appends to the
+            // chain, much as /v1/audit/export does, so it shares that bucket.
+            return auditBuckets;
+        }
+        if (path.startsWith("/v1/attestation/") && path.endsWith("/lifecycle")) {
+            return lifecycleBuckets;
+        }
         if (path.startsWith("/v1/gatekeeper")) {
-            // /keys, /anchor and /health. Supervisory-shaped reads: /anchor
+            // /keys, /anchor, /anchor/timestamps and /health. Supervisory-shaped reads: /anchor
             // signs the head on every call and /health reads the chain, so
             // they belong under a limit, and the registry bucket is the one
-            // sized for supervisory read volume. No sixth bucket is
-            // introduced — five is what the deployment configures.
+            // sized for supervisory read volume, so no bucket of their own.
             return registryBuckets;
         }
         if (path.contains("/registry/")) {

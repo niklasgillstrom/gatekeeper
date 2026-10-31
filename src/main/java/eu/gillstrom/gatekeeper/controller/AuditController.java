@@ -3,6 +3,8 @@ package eu.gillstrom.gatekeeper.controller;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -12,14 +14,18 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import eu.gillstrom.gatekeeper.audit.AuditEntry;
 import eu.gillstrom.gatekeeper.audit.AuditLog;
+import eu.gillstrom.gatekeeper.cose.AuditCoseExport;
+import eu.gillstrom.gatekeeper.cose.CoseSign1;
 import eu.gillstrom.gatekeeper.service.GatekeeperKeyDirectory;
 import eu.gillstrom.gatekeeper.signing.ReceiptSigner;
 
+import java.io.ByteArrayInputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -49,7 +55,12 @@ import java.util.UUID;
  *       (by default the CN value). A certificate without exactly one such
  *       attribute is not authenticated. {@code principal} is URL-decoded.</li>
  *   <li>{@code GET /export?from=...&to=...&inspectionId=...} —
- *       packaged, signed export for a supervisory inspection.</li>
+ *       packaged, signed export for a supervisory inspection. With
+ *       {@code format=cose} the same window is returned as
+ *       {@code application/cbor-seq}: one COSE_Sign1 per entry, each sealed
+ *       at export time by the active signing key (see
+ *       {@link AuditCoseExport}; the seal is not the entry's original
+ *       evidence). {@code format} defaults to {@code json}.</li>
  * </ul>
  *
  * <p>Legal basis:</p>
@@ -135,12 +146,30 @@ public class AuditController {
                 generates a UUID. The bundle includes the chain-head hash
                 at the moment of export so a supervisor can also verify
                 the rest of the chain via the /v1/gatekeeper/anchor
-                endpoint at the same moment.""")
-    public ResponseEntity<AuditExport> exportRange(
+                endpoint at the same moment.
+
+                format=json (default) returns that bundle. format=cose
+                returns application/cbor-seq: one COSE_Sign1 (RFC 9052,
+                tag 18) per entry in the window, protected header
+                {1: alg, 4: kid = SHA-256 of the active key's
+                SubjectPublicKeyInfo}, payload a CBOR map of the entry
+                fields including its original entry signature and RFC 3161
+                token. The COSE signature is an export seal made now by the
+                active key; the entry's own signature, chain hashes and
+                token remain the evidence. inspectionId is not used by the
+                COSE form, which has no bundle envelope.""")
+    public ResponseEntity<?> exportRange(
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant from,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant to,
-            @RequestParam(required = false) String inspectionId) {
+            @RequestParam(required = false) String inspectionId,
+            @RequestParam(required = false) String format) {
         validateRange(from, to);
+        if (format != null && !format.isBlank() && !"json".equalsIgnoreCase(format)) {
+            if (!"cose".equalsIgnoreCase(format)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "format must be json or cose");
+            }
+            return exportCose(auditLog.findInRange(from, to));
+        }
 
         String resolvedInspectionId = (inspectionId == null || inspectionId.isBlank())
                 ? UUID.randomUUID().toString()
@@ -168,6 +197,29 @@ public class AuditController {
                 Base64.getEncoder().encodeToString(sig),
                 fingerprint);
         return ResponseEntity.ok(export);
+    }
+
+    private ResponseEntity<byte[]> exportCose(List<AuditEntry> entries) {
+        byte[] kid = HexFormat.of().parseHex(keyDirectory.activeFingerprintHex());
+        java.security.PublicKey activeKey;
+        try {
+            activeKey = java.security.cert.CertificateFactory.getInstance("X.509")
+                    .generateCertificate(new ByteArrayInputStream(
+                            signer.getSigningCertificatePem().getBytes(StandardCharsets.UTF_8)))
+                    .getPublicKey();
+        } catch (Exception e) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "active signing certificate could not be parsed", e);
+        }
+        byte[] body;
+        try {
+            body = AuditCoseExport.export(entries, signer, activeKey, kid);
+        } catch (CoseSign1.UnsupportedAlgorithmException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_IMPLEMENTED, e.getMessage(), e);
+        }
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(AuditCoseExport.MEDIA_TYPE))
+                .body(body);
     }
 
     private static void validateRange(Instant from, Instant to) {

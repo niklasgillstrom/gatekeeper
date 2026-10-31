@@ -70,7 +70,7 @@ gatekeeper:
     roles:
       # Map client-cert principals (extracted via principal-attribute above) to
       # gatekeeper roles. First-match-wins. SUPERVISOR has full access; FE is
-      # limited to verify/confirm.
+      # limited to verify/confirm and key-lifecycle events.
       #
       # The mappings below are ILLUSTRATIVE TEMPLATES for the reference
       # build — they do not match real Expisoft-issued client certs. A
@@ -132,7 +132,16 @@ gatekeeper:
     audit:
       # /v1/audit/**. /v1/audit/export serialises the whole chain, so this is
       # deliberately close to the registry ceiling rather than to verify's.
+      # /v1/triangulation/** is limited under this bucket too.
       capacity: 120
+      refill-seconds: 60
+    lifecycle:
+      # POST /v1/attestation/{cc}/lifecycle (SIGNED, ROTATED, REVOKED,
+      # DECOMMISSIONED). Sized like verify: rotations, revocations and
+      # decommissionings are issuance-rate events. A financial entity that
+      # reports every signature as a SIGNED event needs this raised to its
+      # signing volume.
+      capacity: 600            # 10 rps sustained
       refill-seconds: 60
     # Reverse proxies whose X-Forwarded-For may be believed. Empty means the
     # header is ignored and the direct peer is the bucket key. A production
@@ -155,6 +164,85 @@ gatekeeper:
     # these keys remain verifiable for the 5-year retention period
     # via GET /v1/gatekeeper/keys.
     retired-keys: ${GATEKEEPER_RETIRED_KEYS:}
+    #
+    # --- Signing key in an HSM (optional; default is the PKCS#12 file above) ---
+    # keystore-type defaults to PKCS12. For a non-exportable HSM key reached
+    # through JCA, set the keystore type the provider offers and, if the
+    # provider is not already registered, provider-class (and provider-config,
+    # passed to Provider.configure()). keystore-path may then be left out: the
+    # keystore is loaded with KeyStore.load(null, <keystore-password = PIN>).
+    # Any misconfiguration — unknown class, configure() failure, missing alias,
+    # or a start-up test signature that does not verify under the alias's
+    # certificate — stops start-up.
+    #
+    #   Example: SunPKCS11 (in the JDK) with a vendor PKCS#11 library
+    #     keystore-type: PKCS11
+    #     provider-class: sun.security.pkcs11.SunPKCS11
+    #     provider-config: /etc/gatekeeper/pkcs11.cfg   # name=..., library=/usr/lib/<vendor>-pkcs11.so, slot=...
+    #     keystore-path: ""                             # not used for PKCS11
+    #     keystore-password: ${GATEKEEPER_HSM_PIN:}     # the PKCS#11 user PIN
+    #     key-alias: nca-seal                           # CKA_LABEL of the key / certificate
+    #
+    #   Example: vendor JCE provider
+    #     keystore-type: <vendor keystore type>
+    #     provider-class: <vendor provider class>
+    #
+    # --- HSM attestation of the signing key (optional) ---
+    # When set, the attestation is verified at start-up with the same verifier
+    # used for supervised entities' keys, against the public key of the active
+    # signing certificate; an attestation that does not verify stops start-up.
+    # The result and the evidence are published on GET /v1/gatekeeper/keys and
+    # GET /v1/gatekeeper/health reports activeKeyAttested. When not set, start-up
+    # logs a WARN that the signing key is not attested.
+    #
+    #   Yubico YubiHSM 2:
+    #     attestation:
+    #       vendor: YUBICO
+    #       yubico:
+    #         chain-path: /etc/gatekeeper/seal-attestation-chain.pem   # attestation cert, device cert, Yubico intermediate
+    #
+    #   Securosys Primus:
+    #     attestation:
+    #       vendor: SECUROSYS
+    #       securosys:
+    #         xml-path: /etc/gatekeeper/seal-attestation.xml           # attestation XML exactly as delivered
+    #         signature-path: /etc/gatekeeper/seal-attestation.sig.b64 # Base64 text of the signature over those bytes
+    #         chain-path: /etc/gatekeeper/seal-attestation-chain.pem   # attestation cert first, then its issuers
+
+  # --- RFC 3161 time-stamping of the audit log (optional; default off) ---
+  # mode: off | entry | anchor. Quote the value: YAML reads a bare off as false
+  # (which the gatekeeper also treats as off).
+  #   entry  — each audit entry gets a TSA token over SHA-256 of its signature
+  #            input (the UTF-8 bytes of thisEntryHashHex), stored on the entry
+  #            outside the hash. A TSA failure writes the entry without a token;
+  #            GET /v1/gatekeeper/health reports untimestampedEntries.
+  #            The TSA call is made while the append lock is held, so its
+  #            timeouts bound the extra latency of every audited request.
+  #   anchor — the chain head is time-stamped every anchor-interval-seconds and
+  #            {headSequenceNumber, headHashHex, tokenBase64, genTime} is appended
+  #            (fsynced) to anchor-path. Latest on GET /v1/gatekeeper/anchor,
+  #            all on GET /v1/gatekeeper/anchor/timestamps.
+  # entry and anchor require tsa-url and trusted-certs-path; start-up fails
+  # without them. When trusted-certs-path is set, the chain-integrity check
+  # validates every stored token (imprint, signature, chain to these certs).
+  #
+  # timestamping:
+  #   mode: "anchor"
+  #   tsa-url: https://tsa.example.eu/rfc3161
+  #   hash-algorithm: SHA-256            # the only supported value
+  #   policy-oid: ""                     # optional reqPolicy
+  #   connect-timeout-ms: 5000
+  #   read-timeout-ms: 10000
+  #   trusted-certs-path: /etc/gatekeeper/tsa-trust.pem   # TSA certificate and/or its CA(s)
+  #   anchor-interval-seconds: 3600
+  #   anchor-path: /var/lib/gatekeeper/audit-log.jsonl.tsa-anchors.jsonl   # default: <audit path>.tsa-anchors.jsonl
+
+  triangulation:
+    # Triangulation inquiries are held in memory only (lost on restart).
+    # At most this many at a time; DELETE an inquiry to free a place.
+    max-inquiries: 10
+    # Entries across all bank and operator reports of one inquiry.
+    max-entries-per-inquiry: 100000
 
 
 # OpenAPI document and Swagger UI are off in every non-dev profile. Neither has

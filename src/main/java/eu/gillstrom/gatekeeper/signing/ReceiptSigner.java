@@ -14,8 +14,10 @@ import eu.gillstrom.gatekeeper.model.VerificationResponse;
  *
  * <ul>
  *   <li>A {@code ConfiguredReceiptSigner} that loads a production signing key
- *       and certificate chain from a PKCS#12 keystore via Spring configuration,
- *       or</li>
+ *       and certificate chain from a PKCS#12 keystore via Spring configuration
+ *       — or, with {@code gatekeeper.signing.keystore-type} and
+ *       {@code gatekeeper.signing.provider-class}, from an HSM through a JCA
+ *       provider, so that the private key never leaves the device — or</li>
  *   <li>An {@code EphemeralReceiptSigner} that generates a fresh RSA key pair
  *       at application startup. The ephemeral variant is intended for reference
  *       use and emits a loud {@code WARN} log at every startup and every

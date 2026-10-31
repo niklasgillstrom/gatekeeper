@@ -13,6 +13,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.service.GatekeeperKeyDirectory;
 import eu.gillstrom.gatekeeper.signing.ReceiptSigner;
+import eu.gillstrom.gatekeeper.timestamp.AuditTimestamping;
+import eu.gillstrom.gatekeeper.timestamp.TimestampAnchorRecord;
+import eu.gillstrom.gatekeeper.timestamp.TimestampAnchorStore;
+import eu.gillstrom.gatekeeper.timestamp.TimestampTokenVerifier;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -35,8 +39,11 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
@@ -78,6 +85,21 @@ import java.util.concurrent.locks.ReentrantLock;
  * walk is O(n) with one signature verification per entry and must not sit
  * in the append path. {@link #cachedIntegrityStatus()} additionally bounds
  * how often that walk runs.</p>
+ *
+ * <p>Entry format: every entry this class writes is in the v2 canonical form
+ * ({@link AuditEntry#canonicalBytesForHashV2}), with the inventory fields of
+ * the {@link AuditAppendRequest} and the per-key link
+ * {@code prevKeyEntryHashHex}. Entries already on disk in the v1 form are
+ * read and verified in the v1 form; a file may switch from v1 to v2 once, at
+ * the upgrade. The per-key index (last {@code thisEntryHashHex} per
+ * {@code keyFingerprintHex}) is rebuilt from the file at start-up.</p>
+ *
+ * <p>Time-stamping: with {@code gatekeeper.timestamping.mode=entry}, each
+ * entry gets an RFC 3161 token over its signature input before it is
+ * persisted; a TSA failure writes the entry without one (see
+ * {@link AuditTimestamping}). When trusted TSA certificates are configured,
+ * {@link #verifyChainIntegrity()} validates every entry token and every
+ * record in the anchor file.</p>
  *
  * <p>Legal basis: see {@link AuditLog} javadoc.</p>
  */
@@ -128,6 +150,19 @@ public class AppendOnlyFileAuditLog implements AuditLog {
     private final List<AuditEntry> entries = new ArrayList<>();
 
     /**
+     * Per-key index: {@code keyFingerprintHex} → {@code thisEntryHashHex} of
+     * the latest entry carrying that fingerprint. Mutated only under
+     * {@link #appendLock}; rebuilt from the file at start-up.
+     */
+    private final Map<String, String> lastEntryHashByKey = new HashMap<>();
+
+    /** Entries in {@link #entries} without a timestamp token. Guarded by {@link #appendLock}. */
+    private long untimestamped;
+
+    /** RFC 3161 configuration; {@link AuditTimestamping#off()} when none is wired. */
+    private final AuditTimestamping timestamping;
+
+    /**
      * Convenience constructor using
      * {@link #DEFAULT_INTEGRITY_CHECK_INTERVAL_SECONDS}. Not the
      * Spring-injected one — see the {@link Autowired} constructor below.
@@ -141,16 +176,23 @@ public class AppendOnlyFileAuditLog implements AuditLog {
         this(configuredPath, signer, integrityCheckIntervalSeconds, null);
     }
 
+    public AppendOnlyFileAuditLog(String configuredPath, ReceiptSigner signer,
+                                  long integrityCheckIntervalSeconds, GatekeeperKeyDirectory keyDirectory) {
+        this(configuredPath, signer, integrityCheckIntervalSeconds, keyDirectory, null);
+    }
+
     @Autowired
     public AppendOnlyFileAuditLog(
             @Value("${gatekeeper.audit.path:./audit-log.jsonl}") String configuredPath,
             ReceiptSigner signer,
             @Value("${gatekeeper.audit.integrity-check-interval-seconds:300}")
             long integrityCheckIntervalSeconds,
-            GatekeeperKeyDirectory keyDirectory) {
+            GatekeeperKeyDirectory keyDirectory,
+            AuditTimestamping timestamping) {
         this.filePath = Paths.get(configuredPath);
         this.signer = signer;
         this.keyDirectory = keyDirectory;
+        this.timestamping = timestamping == null ? AuditTimestamping.off() : timestamping;
         this.integrityCheckIntervalSeconds = integrityCheckIntervalSeconds;
         @SuppressWarnings("deprecation")
         ObjectMapper mapper = new ObjectMapper()
@@ -226,6 +268,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
             }
 
             entries.add(entry);
+            indexForAppend(entry);
             expectedSeq = entry.sequenceNumber() + 1;
             expectedPrev = entry.thisEntryHashHex();
         }
@@ -237,7 +280,14 @@ public class AppendOnlyFileAuditLog implements AuditLog {
         // Run a full chain-integrity check after loading so any tampering
         // since the previous shutdown is surfaced at startup, not only the
         // first time a supervisor calls /v1/gatekeeper/health.
-        boolean intactAtBoot = verifyChain(List.copyOf(entries));
+        boolean intactAtBoot;
+        try {
+            intactAtBoot = verifyChain(List.copyOf(entries), readAnchorsForCheck());
+        } catch (AnchorReadFailure e) {
+            log.warn("AuditLog chain check failed: the timestamp anchor file could not be read: {}",
+                    e.getCause().toString());
+            intactAtBoot = false;
+        }
         cachedIntegrity.set(new IntegrityStatus(intactAtBoot, Instant.now()));
         if (!intactAtBoot && !entries.isEmpty()) {
             log.warn("AppendOnlyFileAuditLog: chain integrity check FAILED at startup. The audit "
@@ -295,23 +345,48 @@ public class AppendOnlyFileAuditLog implements AuditLog {
                     : entries.get(entries.size() - 1).thisEntryHashHex();
             Instant now = Instant.now();
 
-            byte[] canonical = AuditEntry.canonicalBytesForHash(
+            // Per-key link: the previous entry for the same attested key, the
+            // sentinel for the key's first entry, null without a key.
+            String keyFingerprint = req.keyFingerprintHex();
+            String prevKeyHash = keyFingerprint == null
+                    ? null
+                    : lastEntryHashByKey.getOrDefault(keyFingerprint, AuditEntry.SENTINEL_PREV_HASH_HEX);
+
+            byte[] canonical = AuditEntry.canonicalBytesForHashV2(
                     nextSeq, now,
                     req.mtlsClientPrincipal(), req.operation(), req.verificationId(),
                     req.requestDigestBase64(), req.receiptDigestBase64(), req.compliant(),
-                    prevHash);
+                    prevHash,
+                    keyFingerprint, req.certSerialHex(), req.certIssuerDn(),
+                    req.hsmVendor(), req.hsmSerial(), req.registryStatus(),
+                    req.hsmFirmwareVersion(), req.hsmFipsApprovedMode(),
+                    prevKeyHash);
             String thisHash = sha256Hex(canonical);
             byte[] sigBytes = signer.sign(AuditEntry.canonicalBytesForSignature(thisHash));
             String signatureB64 = Base64.getEncoder().encodeToString(sigBytes);
+
+            // Entry mode: a token over the signature input, outside the hash.
+            // A TSA failure returns empty and the entry is written without one
+            // — supervision is never blocked on the TSA.
+            String tokenB64 = timestamping.mode() == AuditTimestamping.Mode.ENTRY
+                    ? timestamping.timestampHashHex(thisHash).map(AuditTimestamping.Token::tokenBase64).orElse(null)
+                    : null;
 
             AuditEntry entry = new AuditEntry(
                     nextSeq, now,
                     req.mtlsClientPrincipal(), req.operation(), req.verificationId(),
                     req.requestDigestBase64(), req.receiptDigestBase64(), req.compliant(),
-                    prevHash, thisHash, signatureB64);
+                    prevHash, thisHash, signatureB64,
+                    AuditEntry.CANONICAL_V2,
+                    keyFingerprint, req.certSerialHex(), req.certIssuerDn(),
+                    req.hsmVendor(), req.hsmSerial(), req.registryStatus(),
+                    req.hsmFirmwareVersion(), req.hsmFipsApprovedMode(),
+                    prevKeyHash,
+                    tokenB64);
 
             persist(entry);
             entries.add(entry);
+            indexForAppend(entry);
 
             log.info("AuditLog append: seq={}, principal={}, op={}, verificationId={}, compliant={}",
                     entry.sequenceNumber(), entry.mtlsClientPrincipal(), entry.operation(),
@@ -320,6 +395,50 @@ public class AppendOnlyFileAuditLog implements AuditLog {
             return entry;
         } finally {
             // Reached only after lockInterruptibly() succeeded.
+            appendLock.unlock();
+        }
+    }
+
+    /**
+     * Advance the per-key index and the untimestamped counter for an entry
+     * that is now part of the chain. Caller holds {@link #appendLock} (or is
+     * the single-threaded loader).
+     */
+    private void indexForAppend(AuditEntry entry) {
+        if (entry.isV2() && entry.keyFingerprintHex() != null) {
+            lastEntryHashByKey.put(entry.keyFingerprintHex(), entry.thisEntryHashHex());
+        }
+        if (entry.timestampTokenBase64() == null) {
+            untimestamped++;
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Counted over the whole chain, including entries written before
+     * {@code entry} mode was enabled and v1 entries.</p>
+     */
+    @Override
+    public OptionalLong untimestampedEntryCount() {
+        appendLock.lock();
+        try {
+            return OptionalLong.of(untimestamped);
+        } finally {
+            appendLock.unlock();
+        }
+    }
+
+    /**
+     * The {@code thisEntryHashHex} of the latest entry for a key fingerprint,
+     * i.e. the value the next entry for that key will carry as
+     * {@code prevKeyEntryHashHex}; empty when the key has no entry yet.
+     */
+    public Optional<String> lastEntryHashForKey(String keyFingerprintHex) {
+        appendLock.lock();
+        try {
+            return Optional.ofNullable(lastEntryHashByKey.get(keyFingerprintHex));
+        } finally {
             appendLock.unlock();
         }
     }
@@ -504,7 +623,42 @@ public class AppendOnlyFileAuditLog implements AuditLog {
         return json.readValue(line, AuditEntry.class);
     }
 
+    /**
+     * Anchor records for the chain check; none when anchors are not checked
+     * (no trusted TSA certificates, so nothing to validate them against, or
+     * no anchor file configured). Read before the memory
+     * snapshot is taken: every anchor is written for a head that was already
+     * in memory, so an anchor read first can never legitimately point past
+     * the snapshot.
+     *
+     * @throws AnchorReadFailure wrapped I/O or parse failure of the file
+     */
+    private List<TimestampAnchorRecord> readAnchorsForCheck() {
+        Optional<TimestampAnchorStore> store = timestamping.verifier().isPresent()
+                ? timestamping.anchorStore() : Optional.empty();
+        try {
+            return store.isPresent() ? store.get().readFromDisk() : List.of();
+        } catch (IOException e) {
+            throw new AnchorReadFailure(e);
+        }
+    }
+
+    /** Unchecked carrier for a failed anchor-file read inside the chain check. */
+    private static final class AnchorReadFailure extends RuntimeException {
+        AnchorReadFailure(IOException cause) {
+            super(cause);
+        }
+    }
+
     private boolean verifyChainOnDisk() {
+        List<TimestampAnchorRecord> anchors;
+        try {
+            anchors = readAnchorsForCheck();
+        } catch (AnchorReadFailure e) {
+            log.warn("AuditLog chain check failed: the timestamp anchor file could not be read back: {}",
+                    e.getCause().toString());
+            return false;
+        }
         List<AuditEntry> memory = snapshot();
         List<AuditEntry> onDisk = new ArrayList<>();
         try {
@@ -541,13 +695,31 @@ public class AppendOnlyFileAuditLog implements AuditLog {
                 return false;
             }
         }
-        return verifyChain(onDisk);
+        return verifyChain(onDisk, anchors);
     }
 
-    /** The chain walk itself. Takes no lock; operates on a snapshot. */
-    private boolean verifyChain(List<AuditEntry> chain) {
+    /**
+     * The chain walk itself. Takes no lock; operates on a snapshot.
+     *
+     * <p>Per entry: sequence number, global link, recomputed hash (v1 or v2
+     * form, as the entry states), signature. For v2 entries additionally the
+     * per-key link. Across entries: once a v2 entry has been seen, no v1
+     * entry may follow, and a v1 entry may not carry any field that only v2
+     * hashes (it would be unauthenticated). When a token validator is
+     * configured, every entry token and every anchor record is validated, and
+     * every anchor must name an entry of this chain by sequence number and
+     * hash.</p>
+     *
+     * @param anchors anchor records to check; empty when anchors are not checked, which is
+     *     always so without a token validator
+     */
+    private boolean verifyChain(List<AuditEntry> chain, List<TimestampAnchorRecord> anchors) {
         String algorithm = signer.getSignatureAlgorithm();
         List<PublicKey> verificationKeys = verificationKeys();
+        TimestampTokenVerifier tokenVerifier = timestamping.verifier().orElse(null);
+        Map<String, String> lastByKey = new HashMap<>();
+        boolean seenV2 = false;
+        long unvalidatedTokens = 0;
         String expectedPrev = AuditEntry.SENTINEL_PREV_HASH_HEX;
         long expectedSeq = 1;
         for (AuditEntry e : chain) {
@@ -558,6 +730,40 @@ public class AppendOnlyFileAuditLog implements AuditLog {
             }
             if (!e.prevEntryHashHex().equals(expectedPrev)) {
                 log.warn("AuditLog chain check failed: prevEntryHash mismatch at sequenceNumber {}", e.sequenceNumber());
+                return false;
+            }
+            if (e.isV2()) {
+                seenV2 = true;
+                String fp = e.keyFingerprintHex();
+                if (fp == null) {
+                    if (e.prevKeyEntryHashHex() != null) {
+                        log.warn("AuditLog chain check failed: entry without keyFingerprintHex carries a "
+                                + "prevKeyEntryHashHex at sequenceNumber {}", e.sequenceNumber());
+                        return false;
+                    }
+                } else {
+                    String expectedPrevKey = lastByKey.getOrDefault(fp, AuditEntry.SENTINEL_PREV_HASH_HEX);
+                    if (e.prevKeyEntryHashHex() == null || !e.prevKeyEntryHashHex().equals(expectedPrevKey)) {
+                        log.warn("AuditLog chain check failed: prevKeyEntryHash mismatch at sequenceNumber {} "
+                                + "(key {})", e.sequenceNumber(), fp);
+                        return false;
+                    }
+                    lastByKey.put(fp, e.thisEntryHashHex());
+                }
+            } else if (e.canonicalVersion() == null) {
+                if (seenV2) {
+                    log.warn("AuditLog chain check failed: v1 entry after a v2 entry at sequenceNumber {}",
+                            e.sequenceNumber());
+                    return false;
+                }
+                if (e.hasV2OnlyFields()) {
+                    log.warn("AuditLog chain check failed: v1 entry at sequenceNumber {} carries v2 fields "
+                            + "its hash does not cover", e.sequenceNumber());
+                    return false;
+                }
+            } else {
+                log.warn("AuditLog chain check failed: unknown canonicalVersion '{}' at sequenceNumber {}",
+                        e.canonicalVersion(), e.sequenceNumber());
                 return false;
             }
             String recomputed = sha256Hex(AuditEntry.canonicalBytesForHash(e));
@@ -573,8 +779,56 @@ public class AppendOnlyFileAuditLog implements AuditLog {
                 log.warn("AuditLog chain check failed: signature did not verify at sequenceNumber {}", e.sequenceNumber());
                 return false;
             }
+            if (e.timestampTokenBase64() != null) {
+                if (tokenVerifier == null) {
+                    unvalidatedTokens++;
+                } else if (!verifyToken(tokenVerifier, e.timestampTokenBase64(), e.thisEntryHashHex(),
+                        "entry sequenceNumber " + e.sequenceNumber())) {
+                    return false;
+                }
+            }
             expectedSeq = e.sequenceNumber() + 1;
             expectedPrev = e.thisEntryHashHex();
+        }
+        if (unvalidatedTokens > 0) {
+            log.warn("AuditLog chain check: {} entry timestamp token(s) present but not validated — "
+                    + "gatekeeper.timestamping.trusted-certs-path is not configured", unvalidatedTokens);
+        }
+        for (TimestampAnchorRecord a : anchors) {
+            long seq = a.headSequenceNumber();
+            if (seq < 1 || seq > chain.size()) {
+                log.warn("AuditLog chain check failed: timestamp anchor names sequenceNumber {} but the "
+                        + "chain holds {} entries", seq, chain.size());
+                return false;
+            }
+            AuditEntry anchored = chain.get((int) (seq - 1));
+            if (!MessageDigest.isEqual(anchored.thisEntryHashHex().getBytes(StandardCharsets.UTF_8),
+                    a.headHashHex().getBytes(StandardCharsets.UTF_8))) {
+                log.warn("AuditLog chain check failed: timestamp anchor for sequenceNumber {} does not "
+                        + "match that entry's hash", seq);
+                return false;
+            }
+            if (!verifyToken(tokenVerifier, a.tokenBase64(), a.headHashHex(),
+                    "anchor of sequenceNumber " + seq)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean verifyToken(TimestampTokenVerifier verifier, String tokenBase64, String hashHex,
+                                       String what) {
+        byte[] token;
+        try {
+            token = Base64.getDecoder().decode(tokenBase64);
+        } catch (IllegalArgumentException ex) {
+            log.warn("AuditLog chain check failed: timestamp token of {} is not valid Base64", what);
+            return false;
+        }
+        TimestampTokenVerifier.Verification v = verifier.verify(token, hashHex.getBytes(StandardCharsets.UTF_8));
+        if (!v.valid()) {
+            log.warn("AuditLog chain check failed: timestamp token of {} did not validate: {}", what, v.error());
+            return false;
         }
         return true;
     }

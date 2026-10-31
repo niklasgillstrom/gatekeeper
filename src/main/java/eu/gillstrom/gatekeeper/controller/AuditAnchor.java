@@ -1,5 +1,8 @@
 package eu.gillstrom.gatekeeper.controller;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+import eu.gillstrom.gatekeeper.timestamp.TimestampAnchorRecord;
+
 import java.time.Instant;
 
 /**
@@ -30,6 +33,13 @@ import java.time.Instant;
  *       {@code headSequenceNumber} for a strictly monotonic chain, but
  *       returned independently so a supervisor cannot be misled by a
  *       buggy implementation that double-counts.</li>
+ *   <li>{@code latestTimestamp} — the most recent RFC 3161 anchor record
+ *       ({@code headSequenceNumber}, {@code headHashHex},
+ *       {@code tokenBase64}, {@code genTime}) when the anchor file holds one
+ *       (i.e. {@code gatekeeper.timestamping.mode=anchor}, or trusted TSA
+ *       certificates configured and anchors on disk). It may name an older
+ *       head than {@code headSequenceNumber}. Absent from the JSON otherwise,
+ *       so the default output is unchanged.</li>
  * </ul>
  *
  * <p>Legal basis: DORA Regulation (EU) 2022/2554 Article 28(6) (5-year
@@ -43,5 +53,13 @@ public record AuditAnchor(
         Instant headTimestamp,
         String headSignatureBase64,
         String signingKeyFingerprintHex,
-        long totalEntries) {
+        long totalEntries,
+        @JsonInclude(JsonInclude.Include.NON_NULL) TimestampAnchorRecord latestTimestamp) {
+
+    /** An anchor without an RFC 3161 record. */
+    public AuditAnchor(long headSequenceNumber, String headHashHex, Instant headTimestamp,
+                       String headSignatureBase64, String signingKeyFingerprintHex, long totalEntries) {
+        this(headSequenceNumber, headHashHex, headTimestamp, headSignatureBase64, signingKeyFingerprintHex,
+                totalEntries, null);
+    }
 }

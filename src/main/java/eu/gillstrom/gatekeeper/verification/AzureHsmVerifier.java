@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.model.HsmVendor;
 
@@ -61,10 +62,24 @@ public class AzureHsmVerifier implements HsmAttestationVerifier {
         this(MarvellAttestation.marvellRoots(), MarvellAttestation.FORMAT_CONFIRMED_BY_REAL_SAMPLE);
     }
 
+    /**
+     * Anchored at the Marvell roots in {@code anchors}: the pinned ones, or
+     * the operator's replacement ({@link TrustAnchors#MARVELL}).
+     */
+    @Autowired
+    public AzureHsmVerifier(TrustAnchors anchors) {
+        this(anchors.marvellRoots(), MarvellAttestation.FORMAT_CONFIRMED_BY_REAL_SAMPLE);
+    }
+
     /** For tests: other roots, and the format gate opened or closed. */
     AzureHsmVerifier(List<X509Certificate> marvellRoots, boolean formatConfirmed) {
         this.marvellRoots = List.copyOf(marvellRoots);
         this.formatConfirmed = formatConfirmed;
+    }
+
+    /** The Marvell roots the manufacturer chain may start from. */
+    List<X509Certificate> marvellRoots() {
+        return marvellRoots;
     }
 
     @Override

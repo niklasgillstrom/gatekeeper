@@ -184,6 +184,20 @@ class GatekeeperControllerTest {
     }
 
     @Test
+    void theAnchorPageAcceptsLimitsFromOneToTheMaximumAndANonNegativeOffset() throws Exception {
+        for (String query : new String[] {"offset=0&limit=1", "limit=" + GatekeeperController.MAX_ANCHOR_PAGE,
+                "offset=5&limit=1"}) {
+            assertThat(mockMvc.perform(get("/v1/gatekeeper/anchor/timestamps?" + query))
+                    .andReturn().getResponse().getStatus()).as(query).isEqualTo(200);
+        }
+        for (String query : new String[] {"offset=-1", "limit=0",
+                "limit=" + (GatekeeperController.MAX_ANCHOR_PAGE + 1)}) {
+            assertThat(mockMvc.perform(get("/v1/gatekeeper/anchor/timestamps?" + query))
+                    .andReturn().getResponse().getStatus()).as(query).isEqualTo(400);
+        }
+    }
+
+    @Test
     void healthReportsTheHeadOfTheChainOrNoneWhenEmpty() throws Exception {
         JsonNode empty = json.readTree(mockMvc.perform(get("/v1/gatekeeper/health"))
                 .andReturn().getResponse().getContentAsString());

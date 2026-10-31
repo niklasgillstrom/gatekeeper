@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.model.HsmVendor;
 
@@ -67,8 +68,29 @@ public class FortanixVerifier implements HsmAttestationVerifier {
     /**
      * Fortanix Attestation and Provisioning Root CA, 2023-09-01 to 2033-08-29,
      * from the sample in "Fortanix DSM for Verifying Key Attestation Statements".
-     * SHA-256 D7:1A:15:B3:4E:78:1E:9E:F9:13:54:FA:BA:E8:B1:15:E0:62:B8:97:95:FE:C3:AE:C0:E0:45:FE:D2:66:C2:C2
      */
+    // Pinned trust anchor
+    //   Subject:  CN=Fortanix Attestation and Provisioning Root CA,O=Fortanix\, Inc.,
+    //             L=Santa Clara,ST=California,C=US (RFC 2253; self-signed)
+    //   SHA-256:  D7:1A:15:B3:4E:78:1E:9E:F9:13:54:FA:BA:E8:B1:15:
+    //             E0:62:B8:97:95:FE:C3:AE:C0:E0:45:FE:D2:66:C2:C2
+    //             (SHA-256 of the DER certificate)
+    //   Key:      D0:12:75:CC:16:BD:C2:DA:D8:CD:51:53:2B:CF:C9:E6:
+    //             9E:DB:99:63:A4:32:4A:A5:E1:29:45:37:2A:FB:5E:15
+    //             (SHA-256 of the certificate's DER SubjectPublicKeyInfo,
+    //             FORTANIX_ROOT_KEY_SHA256, which the constructor checks)
+    //   Validity: 2023-09-01T16:38:12Z to 2033-08-29T16:38:12Z
+    //   Source:   Fortanix, https://pki.fortanix.com/Fortanix_Attestation_and_Provisioning_Root_CA.crt,
+    //             as stated in Fortanix's "Fortanix DSM for Verifying Key
+    //             Attestation Statements" (support.fortanix.com).
+    //   Confirmed: the constant is byte-identical to the root certificate
+    //             in that document's sample statement (vendor-fixtures/fortanix;
+    //             compared on 2026-10-31).
+    //   Operators: download the root from that URL and compare its SHA-256
+    //             with the value above before relying on it.
+    //   Pinned as: the PKIX trust anchor; a copy in the submitted chain is
+    //             recognised by its public key and skipped.
+    //   Checked by TrustAnchorPinningTest; changing the constant fails the build.
     static final String FORTANIX_ROOT_PEM = """
             -----BEGIN CERTIFICATE-----
             MIIF5DCCA8ygAwIBAgIUbJke8FQ1Waqplu/N/rDpkRD6+3wwDQYJKoZIhvcNAQEL
@@ -123,9 +145,23 @@ public class FortanixVerifier implements HsmAttestationVerifier {
         }
     }
 
+    /**
+     * Anchored at the Fortanix root in {@code anchors}: the pinned one, or the
+     * operator's replacement ({@link TrustAnchors#FORTANIX}).
+     */
+    @Autowired
+    public FortanixVerifier(TrustAnchors anchors) {
+        this(anchors.fortanixRoot());
+    }
+
     /** For tests: another root. */
     FortanixVerifier(X509Certificate root) {
         this.root = root;
+    }
+
+    /** The root this verifier anchors authority chains at. */
+    X509Certificate root() {
+        return root;
     }
 
     @Override

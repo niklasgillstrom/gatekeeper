@@ -105,4 +105,24 @@ class VerificationControllerTest {
                         "FORTANIX", "ENTRUST");
         assertThat(controller.health().getBody()).isEqualTo("DORA Attestation Gatekeeper: OK");
     }
+
+    @Test
+    void everyVendorCarriesItsNameItsRequirementsAndTheActiveAnchorsAsTheyStand() {
+        eu.gillstrom.gatekeeper.verification.TrustAnchors pinned =
+                eu.gillstrom.gatekeeper.verification.TrustAnchors.pinned();
+        for (VerificationController.VendorInfo v : controller.supportedVendors().getBody()) {
+            assertThat(v.productName()).as(v.vendorId()).isNotBlank();
+            assertThat(v.requirements()).as(v.vendorId()).startsWith("Requires: ");
+            List<eu.gillstrom.gatekeeper.verification.TrustAnchors.ActiveAnchor> active =
+                    pinned.forVendor(eu.gillstrom.gatekeeper.model.HsmVendor.valueOf(v.vendorId()));
+            assertThat(v.trustAnchors()).as(v.vendorId()).hasSameSizeAs(active).isNotEmpty();
+            for (int i = 0; i < active.size(); i++) {
+                VerificationController.PublishedAnchor p = v.trustAnchors().get(i);
+                eu.gillstrom.gatekeeper.verification.TrustAnchors.ActiveAnchor a = active.get(i);
+                assertThat(p.anchor()).isEqualTo(a.anchor());
+                assertThat(p.publicKeySha256()).as(a.anchor()).isNotEmpty().isEqualTo(a.publicKeySha256());
+                assertThat(p.subjects()).as(a.anchor()).isEqualTo(a.subjects());
+            }
+        }
+    }
 }

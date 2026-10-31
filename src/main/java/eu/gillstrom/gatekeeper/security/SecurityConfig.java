@@ -44,13 +44,16 @@ import java.util.List;
  * <ul>
  *   <li><strong>{@code SUPERVISOR}</strong> — NCA staff. Full access
  *       including {@code /v1/audit/**} (export, range, witness, entity
- *       queries) and {@code /v1/attestation/&#x7b;cc&#x7d;/registry/**}
- *       (statistics, anomalies, awaiting-confirmation listings).</li>
+ *       queries), {@code /v1/attestation/&#x7b;cc&#x7d;/registry/**}
+ *       (statistics, anomalies, awaiting-confirmation listings) and
+ *       {@code /v1/triangulation/**} (data triangulation inquiries).</li>
  *   <li><strong>{@code FE}</strong> — financial-entity client. Limited
  *       to the verification protocol endpoints
  *       ({@code /v1/attestation/&#x7b;cc&#x7d;/verify},
  *       {@code /v1/attestation/&#x7b;cc&#x7d;/verify/batch},
- *       {@code /v1/attestation/&#x7b;cc&#x7d;/confirm}).</li>
+ *       {@code /v1/attestation/&#x7b;cc&#x7d;/confirm}) and key-lifecycle
+ *       events ({@code POST /v1/attestation/&#x7b;cc&#x7d;/lifecycle}), which
+ *       {@code SUPERVISOR} may also post.</li>
  *   <li><strong>{@code SETTLEMENT_RAIL}</strong> — the settlement system
  *       (railgate). Settlement-time signature verification
  *       ({@code POST /api/v1/verify}) only.</li>
@@ -60,8 +63,9 @@ import java.util.List;
  * confirm paths accept either role. The public paths are exactly:
  * {@code /v1/attestation/health}, {@code /v1/attestation/supported-vendors},
  * {@code /v1/gatekeeper/keys}, {@code /v1/gatekeeper/anchor},
+ * {@code /v1/gatekeeper/anchor/timestamps},
  * {@code /swagger-ui/**}, {@code /swagger-ui.html} and
- * {@code /v3/api-docs/**}. The two gatekeeper endpoints need no role because
+ * {@code /v3/api-docs/**}. The three gatekeeper endpoints need no role because
  * a relying party must be able to verify retroactive evidence under DORA
  * Article 28(6); under the {@code nca} profile the TLS layer still requires
  * a client certificate from a trusted CA ({@code client-auth: need}). The rest are
@@ -128,6 +132,9 @@ public class SecurityConfig {
                         "/v1/attestation/supported-vendors",
                         "/v1/gatekeeper/keys",
                         "/v1/gatekeeper/anchor",
+                        // RFC 3161 anchor records: evidence of the same kind
+                        // as /anchor (TSA tokens over chain heads).
+                        "/v1/gatekeeper/anchor/timestamps",
                         // The three springdoc paths exist only under the
                         // dev profile (springdoc.*.enabled=false elsewhere);
                         // in every other profile they are 404 before this
@@ -142,6 +149,12 @@ public class SecurityConfig {
                 // described in SUPERVISORY_OPERATIONS.md §3.5; they must
                 // not be reachable by FE clients.
                 .requestMatchers("/v1/audit/**").hasRole("SUPERVISOR")
+
+                // Supervisor-only — data triangulation inquiries (bank
+                // reports, operator report, discrepancy report). Every
+                // method under the path, so that report submission is
+                // also the supervisor's act, not the reporting party's.
+                .requestMatchers("/v1/triangulation/**").hasRole("SUPERVISOR")
 
                 // /v1/gatekeeper/health was in the permitAll list above.
                 // It is not evidence — a relying party verifying a receipt
@@ -164,6 +177,14 @@ public class SecurityConfig {
                         "/v1/attestation/*/verify/batch",
                         "/v1/attestation/*/confirm"
                 ).hasAnyRole("FE", "SUPERVISOR")
+
+                // FE or supervisor — key-lifecycle events (SIGNED, ROTATED,
+                // REVOKED, DECOMMISSIONED). One path for all four, so the
+                // role set is the same for each; KeyLifecycleService further
+                // binds a status change by a non-supervisor to the principal
+                // that performed the verification.
+                .requestMatchers(HttpMethod.POST, "/v1/attestation/*/lifecycle")
+                        .hasAnyRole("FE", "SUPERVISOR")
 
                 // Settlement-rail enforcement (railgate or equivalent).
                 // The typical caller is a central-bank settlement system

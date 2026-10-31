@@ -1,5 +1,7 @@
 package eu.gillstrom.gatekeeper.controller;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+
 import java.time.Instant;
 
 /**
@@ -30,6 +32,21 @@ import java.time.Instant;
  * @param mode signing mode — {@code "configured"} or {@code "ephemeral"};
  *     a value of {@code "ephemeral"} is a loud signal that the
  *     gatekeeper is running with a throwaway reference key
+ * @param activeKeyAttested whether the HSM attestation of the active signing
+ *     key was verified at start-up ({@code gatekeeper.signing.attestation.*}).
+ *     Present only when attestation is configured — and then {@code true},
+ *     because an attestation that does not verify stops start-up. Absent
+ *     means not configured, i.e. not attested; a monitor that requires an
+ *     attested key checks for {@code activeKeyAttested == true}
+ * @param timestampingMode {@code "entry"} or {@code "anchor"}; absent when
+ *     {@code gatekeeper.timestamping.mode=off}
+ * @param untimestampedEntries {@code entry} mode only: entries in the chain
+ *     without an RFC 3161 token — written while the TSA failed, or before the
+ *     mode was enabled
+ * @param latestTimestampAnchorSequenceNumber {@code anchor} mode only: head
+ *     sequence number of the latest anchor record, absent before the first
+ * @param latestTimestampAnchorGenTime {@code anchor} mode only: its
+ *     {@code genTime}
  */
 public record HealthStatus(
         boolean auditLogReadable,
@@ -39,5 +56,18 @@ public record HealthStatus(
         Instant headTimestamp,
         long totalEntries,
         String activeKeyFingerprint,
-        String mode) {
+        String mode,
+        @JsonInclude(JsonInclude.Include.NON_NULL) Boolean activeKeyAttested,
+        @JsonInclude(JsonInclude.Include.NON_NULL) String timestampingMode,
+        @JsonInclude(JsonInclude.Include.NON_NULL) Long untimestampedEntries,
+        @JsonInclude(JsonInclude.Include.NON_NULL) Long latestTimestampAnchorSequenceNumber,
+        @JsonInclude(JsonInclude.Include.NON_NULL) Instant latestTimestampAnchorGenTime) {
+
+    /** The eight fields of the original health record; every optional field absent. */
+    public HealthStatus(boolean auditLogReadable, boolean chainIntact, Instant chainCheckedAt,
+                        long headSequenceNumber, Instant headTimestamp, long totalEntries,
+                        String activeKeyFingerprint, String mode) {
+        this(auditLogReadable, chainIntact, chainCheckedAt, headSequenceNumber, headTimestamp, totalEntries,
+                activeKeyFingerprint, mode, null, null, null, null, null);
+    }
 }

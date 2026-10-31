@@ -2,6 +2,7 @@ package eu.gillstrom.gatekeeper.verification;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.model.HsmVendor;
 
@@ -49,8 +50,26 @@ public class GoogleCloudHsmVerifier implements HsmAttestationVerifier {
     /**
      * Google's owner root, copied from {@code OWNER_ROOT_CERT_PEM} in
      * {@code verify_attestation_chains.py}. 2017-07-01 to 2030-01-01.
-     * SHA-256 46:B5:FD:35:1D:56:A0:72:1C:A0:AF:CD:17:31:C0:F7:B7:4E:39:41:EB:81:8B:FD:0E:C3:6E:29:DF:0D:E0:95
      */
+    // Pinned trust anchor
+    //   Subject:  CN=Hawksbill Root v1 prod,O=Google Inc,L=Mountain View,ST=CA,C=US
+    //             (RFC 2253; self-signed)
+    //   SHA-256:  46:B5:FD:35:1D:56:A0:72:1C:A0:AF:CD:17:31:C0:F7:
+    //             B7:4E:39:41:EB:81:8B:FD:0E:C3:6E:29:DF:0D:E0:95
+    //             (SHA-256 of the DER certificate)
+    //   Validity: 2017-07-01T00:00:00Z to 2030-01-01T00:00:00Z
+    //   Source:   Google, https://www.gstatic.com/cloudhsm/roots/global_1498867200.pem,
+    //             as named in Google's sample verify_attestation_chains.py
+    //             (googleapis/python-kms, samples/attestations).
+    //   Confirmed: the constant is byte-identical to OWNER_ROOT_CERT_PEM in
+    //             Google's verify_attestation_chains.py
+    //             (GoogleCloudPlatform/python-docs-samples, kms/attestations;
+    //             compared on 2026-10-31), which names that URL as its source.
+    //   Operators: download the root from that URL and compare its SHA-256
+    //             with the value above before relying on it.
+    //   Pinned as: the issuer the owner card and partition certificates must
+    //             name and be signed by.
+    //   Checked by TrustAnchorPinningTest; changing the constant fails the build.
     static final String HAWKSBILL_ROOT_PEM = """
             -----BEGIN CERTIFICATE-----
             MIIDjTCCAnWgAwIBAgIBAzANBgkqhkiG9w0BAQsFADBoMQswCQYDVQQGEwJVUzEL
@@ -84,11 +103,31 @@ public class GoogleCloudHsmVerifier implements HsmAttestationVerifier {
                 MarvellAttestation.FORMAT_CONFIRMED_BY_REAL_SAMPLE);
     }
 
+    /**
+     * Anchored at the Marvell roots and the owner root in {@code anchors}: the
+     * pinned ones, or the operator's replacements ({@link TrustAnchors#MARVELL},
+     * {@link TrustAnchors#GOOGLE_OWNER}).
+     */
+    @Autowired
+    public GoogleCloudHsmVerifier(TrustAnchors anchors) {
+        this(anchors.marvellRoots(), anchors.googleOwnerRoot(), MarvellAttestation.FORMAT_CONFIRMED_BY_REAL_SAMPLE);
+    }
+
     /** For tests: other roots, and the format gate opened or closed. */
     GoogleCloudHsmVerifier(List<X509Certificate> marvellRoots, X509Certificate ownerRoot, boolean formatConfirmed) {
         this.marvellRoots = List.copyOf(marvellRoots);
         this.ownerRoot = ownerRoot;
         this.formatConfirmed = formatConfirmed;
+    }
+
+    /** The Marvell roots the manufacturer chain may start from. */
+    List<X509Certificate> marvellRoots() {
+        return marvellRoots;
+    }
+
+    /** The owner root (pinned: Hawksbill Root v1 prod). */
+    X509Certificate ownerRoot() {
+        return ownerRoot;
     }
 
     @Override

@@ -2,6 +2,7 @@ package eu.gillstrom.gatekeeper.verification;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.w3c.dom.Document;
 import org.w3c.dom.Node;
@@ -35,7 +36,27 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
     private static final Logger log = LoggerFactory.getLogger(SecurosysVerifier.class);
 
     // Securosys Primus HSM Root CA (production)
-    private static final String SECUROSYS_ROOT_CA = """
+    //
+    // Pinned trust anchor
+    //   Subject:  ST=ZH,O=Securosys,L=Zurich,C=CH,CN=PRIMUS_HSM_ROOTKEY
+    //             (RFC 2253; self-signed)
+    //   SHA-256:  D2:C9:3D:8F:69:BC:8D:62:4E:37:F2:5B:9E:6E:7B:EC:
+    //             41:76:1A:AB:86:4C:94:F3:79:36:1B:9B:78:A9:DB:97
+    //             (SHA-256 of the DER certificate)
+    //   Validity: 2024-08-21T12:33:45Z to 2054-08-14T12:33:45Z
+    //   Source:   Securosys, https://support.securosys.com/external/knowledge-base/article/147
+    //             (file hsm_rsa_root.crt). The link is given in
+    //             https://docs.securosys.com/primus-hsm/tutorials/key_attestation_verify,
+    //             which also warns: "Always download the root certificate
+    //             directly from Securosys. Do not accept it from an auditee."
+    //   Confirmed: the attestation from the reference Primus HSM
+    //             (serial 18386101; the real fixture in these repositories)
+    //             validates under it.
+    //   Operators: download the root from that URL and compare its SHA-256
+    //             with the value above before relying on it.
+    //   Pinned as: the PKIX trust anchor (whole certificate).
+    //   Checked by TrustAnchorPinningTest; changing the constant fails the build.
+    static final String SECUROSYS_ROOT_CA = """
             -----BEGIN CERTIFICATE-----
             MIIFhTCCA22gAwIBAgIRAP91g+Ck1hn1Y4ZWwuU3CoQwDQYJKoZIhvcNAQELBQAw
             XDEbMBkGA1UEAwwSUFJJTVVTX0hTTV9ST09US0VZMQswCQYDVQQGEwJDSDEPMA0G
@@ -72,14 +93,43 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
     private final X509Certificate rootCa;
 
     public SecurosysVerifier() {
+        this(pinnedRoot());
+    }
+
+    /**
+     * Anchored at the Securosys root in {@code anchors}: the pinned one, or
+     * the operator's replacement ({@link TrustAnchors#SECUROSYS}).
+     */
+    @Autowired
+    public SecurosysVerifier(TrustAnchors anchors) {
+        this(anchors.securosysRoot());
+    }
+
+    /** For tests: another root. */
+    SecurosysVerifier(X509Certificate rootCa) {
+        this.rootCa = rootCa;
+    }
+
+    /** The root this verifier anchors its chains at. */
+    X509Certificate rootCa() {
+        return rootCa;
+    }
+
+    /** The pinned root, parsed from {@link #SECUROSYS_ROOT_CA}. */
+    static X509Certificate pinnedRoot() {
         try {
             CertificateFactory cf = CertificateFactory.getInstance("X.509");
-            this.rootCa = (X509Certificate) cf.generateCertificate(
+            return (X509Certificate) cf.generateCertificate(
                     new ByteArrayInputStream(SECUROSYS_ROOT_CA.trim().getBytes(StandardCharsets.UTF_8)));
         } catch (Exception e) {
             throw new IllegalStateException(
                     "Failed to load Securosys root CA — SecurosysVerifier cannot be constructed", e);
         }
+    }
+
+    /** The root CA attestation chains are validated against. */
+    public X509Certificate getRootCertificate() {
+        return rootCa;
     }
 
     @Override

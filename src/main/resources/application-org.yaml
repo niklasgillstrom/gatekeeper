@@ -1,0 +1,226 @@
+## Organisation-internal Profile
+## Activate with: --spring.profiles.active=org
+##
+## A regulated organisation (for example a bank or a technical supplier) runs
+## the gatekeeper inside its own ISMS, as its own verification control rather
+## than as the supervisor's. The code is the one the nca profile runs; this
+## profile configures it for that operator:
+##   - receipts, audit entries, settlement verdicts and triangulation reports
+##     are signed with the ORGANISATION's own seal (ConfiguredReceiptSigner,
+##     PKCS#12 keystore named by environment variables);
+##   - file-backed approval registry and audit log;
+##   - mTLS enforced, with role mappings for the organisation's own services;
+##   - rate limits sized for one organisation's traffic.
+## The evidence it produces is the organisation's, signed under its key; a
+## supervisor verifies it against GET /v1/gatekeeper/keys like any other.
+##
+## Optional and OFF by default (commented examples below, under
+## gatekeeper.signing and gatekeeper.timestamping): the seal held in an HSM
+## (keystore type / JCA provider), HSM attestation of the seal key, and
+## RFC 3161 time-stamping of the audit log in entry or anchor mode.
+
+server:
+  port: 8443
+  ssl:
+    enabled: true
+    # Server certificate presented to the organisation's internal clients.
+    key-store-type: PKCS12
+    key-store: ${GATEKEEPER_SERVER_KEYSTORE:/etc/gatekeeper/org-tls.p12}
+    key-store-password: ${GATEKEEPER_SERVER_KEYSTORE_PASSWORD:}
+    key-alias: ${GATEKEEPER_SERVER_KEY_ALIAS:org-tls}
+    # Trust store holding the CA(s) of the organisation's internal client
+    # certificates.
+    trust-store-type: PKCS12
+    trust-store: ${GATEKEEPER_TRUSTSTORE:/etc/gatekeeper/org-client-trust.p12}
+    trust-store-password: ${GATEKEEPER_TRUSTSTORE_PASSWORD:}
+    # Require (not merely request) client certificates.
+    client-auth: need
+
+spring:
+  application:
+    name: gatekeeper-org
+
+gatekeeper:
+  audit:
+    # Hash-chained, signed audit log. Retained for the DORA Article 28(6)
+    # period like the supervisor's; it is the organisation's evidence.
+    path: ${GATEKEEPER_AUDIT_PATH:/var/lib/gatekeeper/audit-log.jsonl}
+    retention-years: 5
+    integrity-check-interval-seconds: ${GATEKEEPER_INTEGRITY_CHECK_INTERVAL_SECONDS:300}
+  registry:
+    # Journal-backed approval registry: restart-safe, fsynced per write.
+    mode: file
+    path: ${GATEKEEPER_REGISTRY_PATH:/var/lib/gatekeeper/approval-registry.jsonl}
+  security:
+    mtls:
+      enabled: true
+      # Subject attribute of the client certificate used as the principal.
+      principal-attribute: CN
+    roles:
+      # ILLUSTRATIVE TEMPLATES, in the style of application-nca.yaml: they
+      # match no real certificates. Replace them with patterns for the client
+      # certificates the organisation's internal PKI actually issues.
+      # First match wins.
+      #
+      #   SUPERVISOR — the organisation's internal audit function and the
+      #                CISO's tooling: audit queries, registry inspection,
+      #                triangulation, health, and every lifecycle event
+      #                (a supervisor may revoke any entry).
+      #   FE         — the issuance service (verify, confirm, ROTATED,
+      #                DECOMMISSIONED, REVOKED for entries it verified) and
+      #                the signing service (SIGNED events).
+      mappings:
+        - cn-pattern: "^internal-audit-.*$|^ciso-tool-.*$"
+          roles: [SUPERVISOR]
+        - cn-pattern: "^issuance-service-.*$|^signing-service-.*$"
+          roles: [FE]
+        # No SETTLEMENT_RAIL mapping: the organisation is not the settlement
+        # rail. An organisation that verifies signatures before releasing a
+        # payment would add, for example:
+        #   - cn-pattern: "^payment-release-.*$"
+        #     roles: [SETTLEMENT_RAIL]
+      # Deny by default.
+      default-roles: []
+  limits:
+    max-http-request-size: ${GATEKEEPER_MAX_REQUEST_SIZE:2MB}
+  ratelimit:
+    # Per principal: each of the organisation's services has its own bucket.
+    verify:
+      capacity: 600            # 10 rps sustained
+      refill-seconds: 60
+    batch:
+      capacity: 10
+      refill-seconds: 60
+    registry:
+      capacity: 120
+      refill-seconds: 60
+    settlement:
+      capacity: 6000
+      refill-seconds: 60
+    audit:
+      # /v1/audit/** and /v1/triangulation/**.
+      capacity: 120
+      refill-seconds: 60
+    lifecycle:
+      # The signing service reports SIGNED once per signature, so this is
+      # sized for signing volume (100 rps sustained), like settlement. Raise
+      # it to the organisation's actual signing rate before go-live.
+      capacity: 6000
+      refill-seconds: 60
+    trusted-proxies: ${GATEKEEPER_TRUSTED_PROXIES:}
+    max-tracked-keys: 10000
+    key-idle-seconds: 900
+  signing:
+    # The organisation's own seal.
+    mode: configured
+    keystore-path: ${GATEKEEPER_SEAL_KEYSTORE:/etc/gatekeeper/org-seal.p12}
+    keystore-password: ${GATEKEEPER_SEAL_KEYSTORE_PASSWORD:}
+    key-alias: ${GATEKEEPER_SEAL_ALIAS:org-seal}
+    # SHA256withRSA / SHA384withRSA / SHA256withECDSA / SHA384withECDSA
+    algorithm: ${GATEKEEPER_SEAL_ALGORITHM:SHA256withRSA}
+    retired-keys: ${GATEKEEPER_RETIRED_KEYS:}
+    #
+    # --- Seal key in an HSM (optional; default is the PKCS#12 file above) ---
+    # keystore-type defaults to PKCS12. For a non-exportable seal key reached
+    # through JCA, set the keystore type the provider offers and, if the
+    # provider is not already registered, provider-class (and provider-config,
+    # passed to Provider.configure()). keystore-path may then be left out: the
+    # keystore is loaded with KeyStore.load(null, <keystore-password = PIN>).
+    # Any misconfiguration — unknown class, configure() failure, missing alias,
+    # or a start-up test signature that does not verify under the alias's
+    # certificate — stops start-up.
+    #
+    #   Example: SunPKCS11 (in the JDK) with the HSM vendor's PKCS#11 library
+    #     keystore-type: PKCS11
+    #     provider-class: sun.security.pkcs11.SunPKCS11
+    #     provider-config: /etc/gatekeeper/pkcs11.cfg   # name=..., library=/usr/lib/<vendor>-pkcs11.so, slot=...
+    #     keystore-path: ""                             # not used for PKCS11
+    #     keystore-password: ${GATEKEEPER_HSM_PIN:}     # the PKCS#11 user PIN
+    #     key-alias: org-seal                           # CKA_LABEL of the key / certificate
+    #
+    #   Example: vendor JCE provider
+    #     keystore-type: <vendor keystore type>
+    #     provider-class: <vendor provider class>
+    #
+    # --- HSM attestation of the seal key (optional) ---
+    # When set, the attestation is verified at start-up with the same verifier
+    # the gatekeeper applies to the keys it supervises, against the public key
+    # of the active seal certificate; an attestation that does not verify stops
+    # start-up. The result and the evidence are published on
+    # GET /v1/gatekeeper/keys, and GET /v1/gatekeeper/health reports
+    # activeKeyAttested. When not set, start-up logs a WARN that the seal key
+    # is not attested. The organisation thereby shows that its own evidence
+    # is sealed with an HSM-generated, non-exportable key.
+    #
+    #   Yubico YubiHSM 2:
+    #     attestation:
+    #       vendor: YUBICO
+    #       yubico:
+    #         chain-path: /etc/gatekeeper/org-seal-attestation-chain.pem   # attestation cert, device cert, Yubico intermediate
+    #
+    #   Securosys Primus:
+    #     attestation:
+    #       vendor: SECUROSYS
+    #       securosys:
+    #         xml-path: /etc/gatekeeper/org-seal-attestation.xml           # attestation XML exactly as delivered
+    #         signature-path: /etc/gatekeeper/org-seal-attestation.sig.b64 # Base64 text of the signature over those bytes
+    #         chain-path: /etc/gatekeeper/org-seal-attestation-chain.pem   # attestation cert first, then its issuers
+
+  # --- RFC 3161 time-stamping of the audit log (optional; default off) ---
+  # mode: off | entry | anchor. Quote the value: YAML reads a bare off as false
+  # (which the gatekeeper also treats as off).
+  #   entry  — each audit entry gets a TSA token over SHA-256 of its signature
+  #            input (the UTF-8 bytes of thisEntryHashHex), stored on the entry
+  #            outside the hash. A TSA failure writes the entry without a token;
+  #            GET /v1/gatekeeper/health reports untimestampedEntries.
+  #            The TSA call is made while the append lock is held, so its
+  #            timeouts bound the extra latency of every audited request —
+  #            in this profile including every SIGNED lifecycle report (see the
+  #            lifecycle rate limit above).
+  #   anchor — the chain head is time-stamped every anchor-interval-seconds and
+  #            {headSequenceNumber, headHashHex, tokenBase64, genTime} is appended
+  #            (fsynced) to anchor-path. Latest on GET /v1/gatekeeper/anchor,
+  #            all on GET /v1/gatekeeper/anchor/timestamps (public).
+  # entry and anchor require tsa-url and trusted-certs-path; start-up fails
+  # without them. When trusted-certs-path is set, the chain-integrity check
+  # validates every stored token (imprint, signature, chain to these certs).
+  #
+  #   Example: entry mode
+  #     timestamping:
+  #       mode: "entry"
+  #       tsa-url: https://tsa.example.eu/rfc3161
+  #       hash-algorithm: SHA-256            # the only supported value
+  #       policy-oid: ""                     # optional reqPolicy
+  #       connect-timeout-ms: 5000
+  #       read-timeout-ms: 10000
+  #       trusted-certs-path: /etc/gatekeeper/tsa-trust.pem   # TSA certificate and/or its CA(s)
+  #
+  #   Example: anchor mode
+  #     timestamping:
+  #       mode: "anchor"
+  #       tsa-url: https://tsa.example.eu/rfc3161
+  #       hash-algorithm: SHA-256
+  #       connect-timeout-ms: 5000
+  #       read-timeout-ms: 10000
+  #       trusted-certs-path: /etc/gatekeeper/tsa-trust.pem
+  #       anchor-interval-seconds: 3600
+  #       anchor-path: /var/lib/gatekeeper/audit-log.jsonl.tsa-anchors.jsonl   # default: <audit path>.tsa-anchors.jsonl
+
+  triangulation:
+    # In memory only (lost on restart).
+    max-inquiries: 10
+    max-entries-per-inquiry: 100000
+
+# OpenAPI document and Swagger UI off, as in every non-dev profile.
+springdoc:
+  api-docs:
+    enabled: false
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: false
+    path: /swagger-ui.html
+    operationsSorter: method
+
+logging:
+  level:
+    eu.gillstrom.gatekeeper: INFO

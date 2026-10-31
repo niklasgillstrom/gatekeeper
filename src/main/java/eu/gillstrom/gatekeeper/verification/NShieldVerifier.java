@@ -7,6 +7,7 @@ import org.bouncycastle.asn1.ASN1Integer;
 import org.bouncycastle.asn1.DERSequence;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.model.HsmVendor;
 
@@ -82,6 +83,27 @@ public class NShieldVerifier implements HsmAttestationVerifier {
     /** Name of the nShield warrant root key. */
     static final String KWARN_1 = "KWARN-1";
     /** KWARN-1, ECDSA NIST P-521, as published by Entrust ("nShield root key"). */
+    // Pinned trust anchor
+    //   Key name: KWARN-1 (Entrust nShield warrant root key, ECDSA NIST P-521)
+    //   SHA-256:  DF:8F:05:A3:95:96:BB:9C:4A:8C:C4:D3:B6:DE:10:60:
+    //             7F:36:2D:71:82:E8:81:EA:82:A5:ED:C7:CD:CD:F8:4F
+    //             (SHA-256 of the DER SubjectPublicKeyInfo of the key built from
+    //             KWARN_1_X and KWARN_1_Y: id-ecPublicKey, named curve
+    //             secp521r1, uncompressed point; this is a bare public key, not
+    //             a certificate)
+    //   Validity: none (a bare public key carries no validity period)
+    //   Source:   Entrust, https://nshielddocs.entrust.com/app-notes/warrants/root-key.html,
+    //             which publishes the key as ECDSA NIST P-521. The first and
+    //             last 16 hex digits of X (1d21dfde6d7e001c…6aa2f40fcae61d96)
+    //             and Y (1641ca5472f06257…208bded5301a1b77) were checked
+    //             against the constants.
+    //   Confirmed: Entrust's example warrants (vendor-fixtures/nshield)
+    //             verify under the key as a whole. Entrust also gives an nCore key hash
+    //             of 679eae63cd8b4e63a57afbf4ac21417ce3578955 (as published).
+    //   Operators: download the root key from that URL and compare its
+    //             SHA-256, as defined above, before relying on it.
+    //   Pinned as: the key the warrant's first signature is checked against.
+    //   Checked by TrustAnchorPinningTest; changing the constants fails the build.
     static final BigInteger KWARN_1_X = new BigInteger(
             "1d21dfde6d7e001c5a4f78ae8d2f799e0caf79c60d673d0da88b206a3ba52f20dce0956ce02f01af32736767c8b9feff398c29e0208527371856aa2f40fcae61d96", 16);
     static final BigInteger KWARN_1_Y = new BigInteger(
@@ -116,6 +138,15 @@ public class NShieldVerifier implements HsmAttestationVerifier {
 
     public NShieldVerifier() {
         this(ecKey("secp521r1", KWARN_1_X, KWARN_1_Y));
+    }
+
+    /**
+     * Anchored at the Entrust root key in {@code anchors}: the pinned KWARN-1
+     * key, or the operator's replacement ({@link TrustAnchors#ENTRUST}).
+     */
+    @Autowired
+    public NShieldVerifier(TrustAnchors anchors) {
+        this(anchors.entrustRootKey());
     }
 
     /** For tests: another root key. */

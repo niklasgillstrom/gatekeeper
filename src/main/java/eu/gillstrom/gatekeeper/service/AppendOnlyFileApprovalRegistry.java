@@ -62,13 +62,26 @@ import java.util.stream.Collectors;
  *       {@code issuedCertificateIssuerDn}. Lines written before 1.5.0 lack
  *       those four fields and replay without a stored certificate and with
  *       a {@code null} {@code confirmationTimestamp}.</li>
+ *   <li><strong>{@code STATUS_CHANGE}</strong> — emitted by
+ *       {@code changeStatus(...)} for an applied key-lifecycle event. Carries
+ *       {@code verificationId}, {@code status} (the new status:
+ *       {@code SUPERSEDED}, {@code REVOKED} or {@code DECOMMISSIONED}),
+ *       {@code previousStatus}, {@code statusChangedAt}, and, when given,
+ *       {@code reason} and {@code successorVerificationId}. Journals written
+ *       before this operation existed contain none and replay unchanged. A
+ *       build that predates it skips such lines as an unknown op type, so
+ *       downgrading loses the status changes.</li>
  * </ul>
  *
  * <p>On startup the journal is replayed in order: each {@code REGISTER}
  * creates an entry; each {@code CONFIRM} applies the confirmation
  * outcome to the existing entry. A {@code CONFIRM} for an unknown
  * {@code verificationId} is logged at WARN and skipped — this should
- * not happen with disciplined writes but is recoverable.</p>
+ * not happen with disciplined writes but is recoverable. A
+ * {@code STATUS_CHANGE} is applied when its entry exists and the change is
+ * allowed from the entry's replayed status
+ * ({@link ApprovalRegistry#isAllowedStatusChange}); otherwise it is logged at
+ * WARN and skipped.</p>
  *
  * <p>Permissions: when the file is created the implementation attempts
  * to set POSIX permissions to {@code 0640}. On non-POSIX filesystems
@@ -87,6 +100,7 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
 
     private static final String OP_REGISTER = "REGISTER";
     private static final String OP_CONFIRM = "CONFIRM";
+    private static final String OP_STATUS_CHANGE = "STATUS_CHANGE";
 
     private final Path journalPath;
     private final ObjectMapper json;
@@ -121,6 +135,7 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
         // Replay the journal to rebuild the in-memory index.
         int registerCount = 0;
         int confirmCount = 0;
+        int statusChangeCount = 0;
         int skipped = 0;
         try (var lines = Files.lines(journalPath, StandardCharsets.UTF_8)) {
             for (String line : (Iterable<String>) lines::iterator) {
@@ -153,6 +168,12 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
                         // would make an already-used nonce valid again.
                         existing.setConfirmationNonce(null);
                         confirmCount++;
+                    } else if (OP_STATUS_CHANGE.equals(opType)) {
+                        if (replayStatusChange(op)) {
+                            statusChangeCount++;
+                        } else {
+                            skipped++;
+                        }
                     } else {
                         log.warn("Replay: unknown op type {} — skipping line", opType);
                         skipped++;
@@ -164,8 +185,43 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
             }
         }
         log.info("AppendOnlyFileApprovalRegistry initialised: replayed {} REGISTER + {} CONFIRM ops "
-                + "from {} ({} entries in index, {} skipped)",
-                registerCount, confirmCount, journalPath, entries.size(), skipped);
+                + "+ {} STATUS_CHANGE ops from {} ({} entries in index, {} skipped)",
+                registerCount, confirmCount, statusChangeCount, journalPath, entries.size(), skipped);
+    }
+
+    /**
+     * Apply one journalled {@code STATUS_CHANGE}. Returns {@code false}, after
+     * a WARN, when the entry is unknown, the status is not a lifecycle status,
+     * or the change is not allowed from the entry's replayed status: the
+     * journal only ever records allowed changes, so any of these means the
+     * line is not one this registry wrote in that order.
+     */
+    private boolean replayStatusChange(JsonNode op) {
+        String verificationId = op.path("verificationId").asText();
+        RegistryEntry existing = entries.get(verificationId);
+        if (existing == null) {
+            log.warn("Replay: STATUS_CHANGE for unknown verificationId={} — skipping", verificationId);
+            return false;
+        }
+        RegistryStatus target;
+        try {
+            target = RegistryStatus.valueOf(op.path("status").asText());
+        } catch (IllegalArgumentException e) {
+            log.warn("Replay: STATUS_CHANGE with unknown status '{}' for verificationId={} — skipping",
+                    op.path("status").asText(), verificationId);
+            return false;
+        }
+        if (!ApprovalRegistry.isLifecycleStatus(target)
+                || !ApprovalRegistry.isAllowedStatusChange(existing.getStatus(), target)) {
+            log.warn("Replay: STATUS_CHANGE {} -> {} for verificationId={} is not an allowed transition — skipping",
+                    existing.getStatus(), target, verificationId);
+            return false;
+        }
+        ApprovalRegistry.applyStatusChange(existing, target,
+                op.path("statusChangedAt").asText(null),
+                op.path("reason").asText(null),
+                op.path("successorVerificationId").asText(null));
+        return true;
     }
 
     private void applyPosixPermissions(Path path) {
@@ -371,6 +427,56 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
         // it was registered with, and confirm is single-use, so nothing changed it.
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Runs under {@link #writeLock}, like {@link #confirm}: the check
+     * against the current status, the journal append and the in-memory change
+     * are one step. The {@code STATUS_CHANGE} line is fsynced before the
+     * in-memory entry changes, so a journal failure leaves the entry as it
+     * was and propagates as {@link IllegalStateException}.</p>
+     */
+    @Override
+    public StatusChange changeStatus(String verificationId, RegistryStatus target, String reason,
+                                     String successorVerificationId) {
+        if (!ApprovalRegistry.isLifecycleStatus(target)) {
+            throw new IllegalArgumentException("Not a lifecycle status: " + target);
+        }
+        writeLock.lock();
+        try {
+            RegistryEntry entry = entries.get(verificationId);
+            if (entry == null) {
+                return StatusChange.notFound();
+            }
+            RegistryStatus current = entry.getStatus();
+            if (!ApprovalRegistry.isAllowedStatusChange(current, target)) {
+                return StatusChange.refused(current);
+            }
+            String changedAt = Instant.now().toString();
+            String successor = target == RegistryStatus.SUPERSEDED ? successorVerificationId : null;
+            appendOp(OP_STATUS_CHANGE, verificationId, mapper -> {
+                ObjectNode op = mapper
+                        .createObjectNode()
+                        .put("op", OP_STATUS_CHANGE)
+                        .put("verificationId", verificationId)
+                        .put("status", target.name())
+                        .put("previousStatus", current.name())
+                        .put("statusChangedAt", changedAt);
+                if (reason != null) {
+                    op.put("reason", reason);
+                }
+                if (successor != null) {
+                    op.put("successorVerificationId", successor);
+                }
+                return op;
+            });
+            ApprovalRegistry.applyStatusChange(entry, target, changedAt, reason, successor);
+            return StatusChange.applied(current, target, changedAt);
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
     private static IssuedCertificate issuedCertificateFrom(JsonNode op) {
         String pem = op.path("issuedCertificatePem").asText(null);
         String serialHex = op.path("issuedCertificateSerial").asText(null);
@@ -475,7 +581,7 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
         List<RegistryEntry> countryEntries = findByCountry(countryCode);
         long total = countryEntries.size();
         long compliant = countryEntries.stream()
-                .filter(e -> e.getStatus() == RegistryStatus.VERIFIED_AND_ISSUED)
+                .filter(e -> ApprovalRegistry.wasVerifiedAndIssued(e.getStatus()))
                 .count();
         long anomalies = countryEntries.stream()
                 .filter(e -> e.getStatus() != null && e.getStatus().name().startsWith("ANOMALY"))

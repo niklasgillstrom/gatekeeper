@@ -2,15 +2,23 @@ package eu.gillstrom.gatekeeper.controller;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 import eu.gillstrom.gatekeeper.audit.AuditEntry;
 import eu.gillstrom.gatekeeper.audit.AuditLog;
 import eu.gillstrom.gatekeeper.service.GatekeeperKeyDirectory;
 import eu.gillstrom.gatekeeper.signing.ReceiptSigner;
+import eu.gillstrom.gatekeeper.signing.SigningKeyAttestation;
+import eu.gillstrom.gatekeeper.timestamp.AuditTimestamping;
+import eu.gillstrom.gatekeeper.timestamp.TimestampAnchorRecord;
+import eu.gillstrom.gatekeeper.timestamp.TimestampAnchorService;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -33,7 +41,11 @@ import java.util.Optional;
  *   <li>{@code GET /anchor} — current chain head, signed. Published
  *       periodically (e.g. daily) to a public commitment log so the
  *       audit trail cannot be retroactively rewritten without
- *       detection.</li>
+ *       detection. Carries the latest RFC 3161 anchor record as
+ *       {@code latestTimestamp} when one exists.</li>
+ *   <li>{@code GET /anchor/timestamps?offset=&limit=} — the RFC 3161
+ *       anchor records, oldest first, paged
+ *       ({@link TimestampAnchorList}). Public, like {@code /anchor}.</li>
  *   <li>{@code GET /health} — operational health, including the most
  *       recent outcome of {@link AuditLog#verifyChainIntegrity()} as
  *       served by {@link AuditLog#cachedIntegrityStatus()} and the
@@ -58,19 +70,39 @@ import java.util.Optional;
          + "trail can be verified retroactively under DORA Article 28(6).")
 public class GatekeeperController {
 
+    /** Upper bound on {@code limit} for {@code GET /anchor/timestamps}. */
+    static final int MAX_ANCHOR_PAGE = 1000;
+
     private final GatekeeperKeyDirectory keyDirectory;
     private final AuditLog auditLog;
     private final ReceiptSigner signer;
     private final String mode;
+    private final SigningKeyAttestation signingKeyAttestation;
+    private final AuditTimestamping timestamping;
+    private final TimestampAnchorService anchorService;
 
     public GatekeeperController(GatekeeperKeyDirectory keyDirectory,
                                 AuditLog auditLog,
                                 ReceiptSigner signer,
-                                @Value("${gatekeeper.signing.mode:ephemeral}") String mode) {
+                                String mode) {
+        this(keyDirectory, auditLog, signer, mode, null, null, null);
+    }
+
+    @Autowired
+    public GatekeeperController(GatekeeperKeyDirectory keyDirectory,
+                                AuditLog auditLog,
+                                ReceiptSigner signer,
+                                @Value("${gatekeeper.signing.mode:ephemeral}") String mode,
+                                SigningKeyAttestation signingKeyAttestation,
+                                AuditTimestamping timestamping,
+                                TimestampAnchorService anchorService) {
         this.keyDirectory = keyDirectory;
         this.auditLog = auditLog;
         this.signer = signer;
         this.mode = mode;
+        this.signingKeyAttestation = signingKeyAttestation;
+        this.timestamping = timestamping;
+        this.anchorService = anchorService;
     }
 
     @GetMapping("/keys")
@@ -82,7 +114,14 @@ public class GatekeeperController {
                 response includes the currently-active key plus every
                 retired key configured via gatekeeper.signing.retired-keys.
                 Operators paste this list into Finansinspektionen's
-                swish.gatekeeper.trusted-keys-config.""")
+                swish.gatekeeper.trusted-keys-config.
+
+                When gatekeeper.signing.attestation.* is configured, the
+                ACTIVE entry also carries "attestation": the verified HSM
+                attestation of the signing key (vendor, hsmSerial, valid,
+                chainValid, publicKeyMatch, keyOrigin, exportable, ...) and
+                the evidence itself, so a relying party can re-verify it
+                against the vendor root.""")
     public ResponseEntity<List<GatekeeperKeyDirectory.KeyEntry>> publishKeys() {
         return ResponseEntity.ok(keyDirectory.allKeys());
     }
@@ -99,8 +138,13 @@ public class GatekeeperController {
                 organisation-certificate-backed signing key — the
                 certificate the NCA uses for ordinary administrative
                 signing of supervisory acts) over the UTF-8 bytes of
-                headHashHex.""")
+                headHashHex.
+
+                latestTimestamp, present only when an RFC 3161 anchor record
+                exists, is the most recent one: a TSA token over SHA-256 of
+                the UTF-8 bytes of that record's headHashHex.""")
     public ResponseEntity<AuditAnchor> currentAnchor() {
+        TimestampAnchorRecord latestTimestamp = anchorService == null ? null : anchorService.latest().orElse(null);
         Optional<AuditEntry> headOpt = auditLog.head();
         if (headOpt.isEmpty()) {
             // Empty-log anchor: still signed so a supervisor can prove the
@@ -113,7 +157,8 @@ public class GatekeeperController {
                     null,
                     Base64.getEncoder().encodeToString(sig),
                     keyDirectory.activeFingerprintHex(),
-                    0L);
+                    0L,
+                    latestTimestamp);
             return ResponseEntity.ok(anchor);
         }
         AuditEntry head = headOpt.get();
@@ -124,8 +169,47 @@ public class GatekeeperController {
                 head.timestamp(),
                 Base64.getEncoder().encodeToString(sig),
                 keyDirectory.activeFingerprintHex(),
-                auditLog.size());
+                auditLog.size(),
+                latestTimestamp);
         return ResponseEntity.ok(anchor);
+    }
+
+    @GetMapping("/anchor/timestamps")
+    @Operation(
+        summary = "RFC 3161 anchor records of the audit-chain head",
+        description = """
+                Lists the anchor records written under
+                gatekeeper.timestamping.mode=anchor, oldest first:
+                headSequenceNumber, headHashHex, tokenBase64 (DER
+                TimeStampToken over SHA-256 of the UTF-8 bytes of
+                headHashHex) and genTime. Paged with offset (default 0) and
+                limit (default 100, at most 1000). Empty when no anchor file
+                is in use.""")
+    public ResponseEntity<TimestampAnchorList> anchorTimestamps(
+            @RequestParam(defaultValue = "0") int offset,
+            @RequestParam(defaultValue = "100") int limit) {
+        if (offset < 0 || limit < 1 || limit > MAX_ANCHOR_PAGE) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "offset must be >= 0 and limit between 1 and " + MAX_ANCHOR_PAGE);
+        }
+        List<TimestampAnchorRecord> all = anchorService == null ? List.of() : anchorService.all();
+        int from = (int) Math.min(offset, all.size());
+        int to = (int) Math.min((long) from + limit, all.size());
+        String timestampingMode = timestamping == null ? AuditTimestamping.Mode.OFF.label() : timestamping.mode().label();
+        return ResponseEntity.ok(new TimestampAnchorList(timestampingMode, all.size(), offset,
+                List.copyOf(all.subList(from, to))));
+    }
+
+    /**
+     * A page of anchor records.
+     *
+     * @param timestampingMode {@code off}, {@code entry} or {@code anchor}
+     * @param total number of records in the anchor file
+     * @param offset index of the first record returned
+     * @param records the records, oldest first
+     */
+    public record TimestampAnchorList(String timestampingMode, long total, int offset,
+                                      List<TimestampAnchorRecord> records) {
     }
 
     @GetMapping("/health")
@@ -139,6 +223,12 @@ public class GatekeeperController {
                 key, and the signing mode (configured or ephemeral).
                 Monitoring systems should fail closed if chainIntact is
                 false or mode is "ephemeral" in production.
+
+                Optional fields, absent unless the feature is configured:
+                activeKeyAttested (gatekeeper.signing.attestation.*),
+                timestampingMode, untimestampedEntries (entry mode),
+                latestTimestampAnchorSequenceNumber and
+                latestTimestampAnchorGenTime (anchor mode).
 
                 The integrity result is cached: it is recomputed at most
                 once per gatekeeper.audit.integrity-check-interval-seconds
@@ -175,10 +265,30 @@ public class GatekeeperController {
         } catch (Exception e) {
             integrity = new AuditLog.IntegrityStatus(false, null);
         }
+        Boolean activeKeyAttested = signingKeyAttestation != null && signingKeyAttestation.isConfigured()
+                ? signingKeyAttestation.isActiveKeyAttested() : null;
+        AuditTimestamping.Mode tsMode = timestamping == null ? AuditTimestamping.Mode.OFF : timestamping.mode();
+        Long untimestamped = null;
+        if (tsMode == AuditTimestamping.Mode.ENTRY) {
+            java.util.OptionalLong count = auditLog.untimestampedEntryCount();
+            untimestamped = count.isPresent() ? count.getAsLong() : null;
+        }
+        Long anchorSeq = null;
+        java.time.Instant anchorGenTime = null;
+        if (tsMode == AuditTimestamping.Mode.ANCHOR && anchorService != null) {
+            Optional<TimestampAnchorRecord> latest = anchorService.latest();
+            if (latest.isPresent()) {
+                anchorSeq = latest.get().headSequenceNumber();
+                anchorGenTime = latest.get().genTime();
+            }
+        }
         HealthStatus status = new HealthStatus(
                 readable, integrity.intact(), integrity.checkedAt(),
                 headSeq, headTs, size,
-                keyDirectory.activeFingerprintHex(), mode);
+                keyDirectory.activeFingerprintHex(), mode,
+                activeKeyAttested,
+                tsMode == AuditTimestamping.Mode.OFF ? null : tsMode.label(),
+                untimestamped, anchorSeq, anchorGenTime);
         return ResponseEntity.ok(status);
     }
 }

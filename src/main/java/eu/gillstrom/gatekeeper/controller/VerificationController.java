@@ -6,6 +6,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -13,6 +14,7 @@ import org.springframework.web.server.ResponseStatusException;
 import eu.gillstrom.gatekeeper.model.*;
 import eu.gillstrom.gatekeeper.service.ApprovalRegistry;
 import eu.gillstrom.gatekeeper.service.VerificationService;
+import eu.gillstrom.gatekeeper.verification.TrustAnchors;
 
 import java.util.List;
 
@@ -78,11 +80,25 @@ public class VerificationController {
 
     private final VerificationService verificationService;
     private final ApprovalRegistry approvalRegistry;
+    private final TrustAnchors trustAnchors;
 
+    /**
+     * Reports the pinned trust anchors in {@link #supportedVendors()}. For
+     * callers that build the controller themselves; the application uses the
+     * constructor that takes its {@link TrustAnchors}.
+     */
     public VerificationController(VerificationService verificationService,
                                       ApprovalRegistry approvalRegistry) {
+        this(verificationService, approvalRegistry, TrustAnchors.pinned());
+    }
+
+    @Autowired
+    public VerificationController(VerificationService verificationService,
+                                      ApprovalRegistry approvalRegistry,
+                                      TrustAnchors trustAnchors) {
         this.verificationService = verificationService;
         this.approvalRegistry = approvalRegistry;
+        this.trustAnchors = trustAnchors;
     }
 
     // =========================================================================
@@ -296,28 +312,40 @@ public class VerificationController {
     @GetMapping("/supported-vendors")
     @Operation(
         summary = "List supported HSM vendors",
-        description = "Returns the list of HSM vendors for which attestation verification is supported.")
+        description = """
+            Returns the list of HSM vendors for which attestation verification
+            is supported and, per vendor, the trust anchors its verifier starts
+            from: for each, its SHA-256 (of the DER certificate, or for Entrust
+            of the DER SubjectPublicKeyInfo) and its origin, "pinned" (the
+            constant in the verifier source) or "override" (the operator's file,
+            gatekeeper.trust-anchors.<key>; its path is logged at start-up, not
+            published here).""")
     public ResponseEntity<List<VendorInfo>> supportedVendors() {
         return ResponseEntity.ok(List.of(
-            new VendorInfo("SECUROSYS", "Securosys Primus HSM",
+            vendor(HsmVendor.SECUROSYS, "Securosys Primus HSM",
                 "Requires: attestationData (XML), attestationSignature, attestationCertChain"),
-            new VendorInfo("YUBICO", "Yubico YubiHSM 2",
+            vendor(HsmVendor.YUBICO, "Yubico YubiHSM 2",
                 "Requires: attestationCertChain"),
-            new VendorInfo("AZURE", "Microsoft Azure Managed HSM",
+            vendor(HsmVendor.AZURE, "Microsoft Azure Managed HSM",
                 "Requires: attestationData (JSON from az keyvault key get-attestation)"),
-            new VendorInfo("GOOGLE", "Google Cloud HSM",
+            vendor(HsmVendor.GOOGLE, "Google Cloud HSM",
                 "Requires: attestationData (base64), attestationCertChain"),
-            new VendorInfo("MARVELL", "Marvell LiquidSecurity HSM",
+            vendor(HsmVendor.MARVELL, "Marvell LiquidSecurity HSM",
                 "Requires: attestationData (base64 of attest.dat), attestationCertChain (partition and card certificates)"),
-            new VendorInfo("THALES", "Thales Luna HSM",
+            vendor(HsmVendor.THALES, "Thales Luna HSM",
                 "Requires: attestationData (base64 of the PKC from cmu getpkc)"),
-            new VendorInfo("CRYPTO4A", "Crypto4A QASM",
+            vendor(HsmVendor.CRYPTO4A, "Crypto4A QASM",
                 "Requires: attestationData (the QASM attestation message, base64 or PEM)"),
-            new VendorInfo("FORTANIX", "Fortanix DSM",
+            vendor(HsmVendor.FORTANIX, "Fortanix DSM",
                 "Requires: attestationData (the DSM key attestation JSON)"),
-            new VendorInfo("ENTRUST", "Entrust nShield",
+            vendor(HsmVendor.ENTRUST, "Entrust nShield",
                 "Requires: attestationData (the nfkmattest key attestation bundle JSON)")
         ));
+    }
+
+    private VendorInfo vendor(HsmVendor vendor, String productName, String requirements) {
+        return new VendorInfo(vendor.name(), productName, requirements,
+                trustAnchors.forVendor(vendor).stream().map(PublishedAnchor::of).toList());
     }
 
     @GetMapping("/health")
@@ -326,5 +354,28 @@ public class VerificationController {
         return ResponseEntity.ok("DORA Attestation Gatekeeper: OK");
     }
 
-    public record VendorInfo(String vendorId, String productName, String requirements) {}
+    /**
+     * One supported vendor.
+     *
+     * @param trustAnchors the anchors the vendor's verifier starts from, as
+     *                     {@link TrustAnchors#forVendor} reports them: GOOGLE
+     *                     has the Marvell roots and its owner root, AZURE and
+     *                     MARVELL the Marvell roots, every other vendor its own
+     */
+    public record VendorInfo(String vendorId, String productName, String requirements,
+                             List<PublishedAnchor> trustAnchors) {}
+
+    /**
+     * An active trust anchor as published on this unauthenticated endpoint:
+     * everything in {@link TrustAnchors.ActiveAnchor} except the override
+     * file's path on the server, which a relying party does not need (it
+     * compares fingerprints) and which is logged at start-up instead.
+     */
+    public record PublishedAnchor(String anchor, String origin, String sha256Of, List<String> sha256,
+                                  List<String> publicKeySha256, List<String> subjects, boolean matchesPinned) {
+        static PublishedAnchor of(TrustAnchors.ActiveAnchor a) {
+            return new PublishedAnchor(a.anchor(), a.origin(), a.sha256Of(), a.sha256(), a.publicKeySha256(),
+                    a.subjects(), a.matchesPinned());
+        }
+    }
 }

@@ -1,11 +1,15 @@
 package eu.gillstrom.gatekeeper.service;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import eu.gillstrom.gatekeeper.signing.KeyAttestation;
 import eu.gillstrom.gatekeeper.signing.ReceiptSigner;
+import eu.gillstrom.gatekeeper.signing.SigningKeyAttestation;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
@@ -39,6 +43,11 @@ import java.util.Optional;
  * skipped; the gatekeeper does not refuse to start over a misconfigured
  * historical key.</p>
  *
+ * <p>When {@code gatekeeper.signing.attestation.*} is configured, the
+ * {@code ACTIVE} entry carries the verified HSM attestation of the key and its
+ * evidence ({@link KeyAttestation}); otherwise the field is absent from the
+ * JSON. Retired entries never carry one.</p>
+ *
  * <p>Legal basis:</p>
  * <ul>
  *   <li>DORA Article 28(6) — 5-year retention obligates retroactive
@@ -54,14 +63,22 @@ public class GatekeeperKeyDirectory {
 
     private final ReceiptSigner activeSigner;
     private final String retiredKeysRaw;
+    private final SigningKeyAttestation signingKeyAttestation;
     private final List<KeyEntry> directory = new ArrayList<>();
     private KeyEntry activeEntry;
 
+    public GatekeeperKeyDirectory(ReceiptSigner activeSigner, String retiredKeysRaw) {
+        this(activeSigner, retiredKeysRaw, null);
+    }
+
+    @Autowired
     public GatekeeperKeyDirectory(
             ReceiptSigner activeSigner,
-            @Value("${gatekeeper.signing.retired-keys:}") String retiredKeysRaw) {
+            @Value("${gatekeeper.signing.retired-keys:}") String retiredKeysRaw,
+            SigningKeyAttestation signingKeyAttestation) {
         this.activeSigner = activeSigner;
         this.retiredKeysRaw = retiredKeysRaw == null ? "" : retiredKeysRaw;
+        this.signingKeyAttestation = signingKeyAttestation;
     }
 
     @PostConstruct
@@ -69,7 +86,10 @@ public class GatekeeperKeyDirectory {
         // Active key first, so it always heads the directory.
         try {
             X509Certificate active = parseFirstCertificate(activeSigner.getSigningCertificatePem());
-            this.activeEntry = toKeyEntry(active, activeSigner.getSigningCertificatePem(), "ACTIVE");
+            KeyAttestation attestation = signingKeyAttestation == null
+                    ? null : signingKeyAttestation.attestation().orElse(null);
+            this.activeEntry = toKeyEntry(active, activeSigner.getSigningCertificatePem(), "ACTIVE")
+                    .withAttestation(attestation);
             directory.add(activeEntry);
             log.info("GatekeeperKeyDirectory: active signing key registered: keyId={}, fingerprint={}, validUntil={}",
                     activeEntry.keyId(), activeEntry.publicKeyFingerprintHex(), activeEntry.validTo());
@@ -196,6 +216,9 @@ public class GatekeeperKeyDirectory {
      * @param validTo certificate notAfter
      * @param algorithm public-key algorithm (e.g. "RSA", "EC")
      * @param status {@code "ACTIVE"} or {@code "RETIRED"}
+     * @param attestation verified HSM attestation of the active key and its
+     *     evidence; {@code null} — and omitted from the JSON — unless
+     *     {@code gatekeeper.signing.attestation.*} is configured
      */
     public record KeyEntry(
             String keyId,
@@ -204,6 +227,18 @@ public class GatekeeperKeyDirectory {
             Instant validFrom,
             Instant validTo,
             String algorithm,
-            String status) {
+            String status,
+            @JsonInclude(JsonInclude.Include.NON_NULL) KeyAttestation attestation) {
+
+        /** An entry without attestation. */
+        public KeyEntry(String keyId, String certificatePem, String publicKeyFingerprintHex, Instant validFrom,
+                        Instant validTo, String algorithm, String status) {
+            this(keyId, certificatePem, publicKeyFingerprintHex, validFrom, validTo, algorithm, status, null);
+        }
+
+        KeyEntry withAttestation(KeyAttestation a) {
+            return new KeyEntry(keyId, certificatePem, publicKeyFingerprintHex, validFrom, validTo, algorithm,
+                    status, a);
+        }
     }
 }

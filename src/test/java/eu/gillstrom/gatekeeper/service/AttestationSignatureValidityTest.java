@@ -165,6 +165,116 @@ class AttestationSignatureValidityTest {
         assertThat(dora.isArticle28_1a()).isTrue();
     }
 
+    /** The request of {@link #genuineYubiHsm2AttestationSetsEveryArticleBit}. */
+    private static VerificationRequest yubicoRequest() throws Exception {
+        JsonNode yubico;
+        try (InputStream in = AttestationSignatureValidityTest.class
+                .getResourceAsStream("/fixtures/yubico/request.json")) {
+            yubico = new ObjectMapper().readTree(in);
+        }
+        List<String> chain = new ArrayList<>();
+        for (JsonNode pem : yubico.get("attestationCertChain")) {
+            chain.add(pem.asText());
+        }
+        VerificationRequest request = new VerificationRequest();
+        request.setPublicKey(yubico.get("csr").asText());
+        request.setHsmVendor("YUBICO");
+        request.setAttestationCertChain(chain);
+        request.setSupplierIdentifier("556000-0000");
+        request.setSupplierName("Svensk TL");
+        request.setCountryCode("SE");
+        return request;
+    }
+
+    @Test
+    void genuineYubiHsm2AttestationReportsFirmwareAndFipsFieldsOutsideTheSignedForm() throws Exception {
+        VerificationResponse receipt = service.verify(yubicoRequest());
+
+        assertThat(receipt.isCompliant()).isTrue();
+        // Firmware from the key certificate (41482.4.1); the FIPS indicator
+        // (41482.4.10) from the device attestation certificate, the only one
+        // that carries it; no FIPS-approved flag (41482.4.12) on either.
+        assertThat(receipt.getHsmFirmwareVersion()).isEqualTo("2.2.0");
+        assertThat(receipt.getHsmFipsIndicator()).isEqualTo(5);
+        assertThat(receipt.getHsmFipsApprovedMode()).isNull();
+
+        // Not signed: the canonical bytes do not change with them.
+        byte[] signed = eu.gillstrom.gatekeeper.signing.ReceiptCanonicalizer.canonicalize(receipt);
+        receipt.setHsmFirmwareVersion("9.9.9");
+        receipt.setHsmFipsIndicator(6);
+        receipt.setHsmFipsApprovedMode(Boolean.TRUE);
+        assertThat(eu.gillstrom.gatekeeper.signing.ReceiptCanonicalizer.canonicalize(receipt)).isEqualTo(signed);
+
+        // Other vendors report none of them.
+        VerificationResponse securosys = service.verify(securosysRequest(fixture.get("attestationData").asText()));
+        assertThat(securosys.isCompliant()).isTrue();
+        assertThat(securosys.getHsmFirmwareVersion()).isNull();
+        assertThat(securosys.getHsmFipsIndicator()).isNull();
+        assertThat(securosys.getHsmFipsApprovedMode()).isNull();
+    }
+
+    @Test
+    void requiringFipsApprovedModeMakesTheGenuineYubiHsm2AttestationNonCompliant() throws Exception {
+        VerificationResponse required = service(new KeyPolicy(KeyPolicy.DEFAULT_ALLOWED_KEYS, true), "fips.jsonl")
+                .verify(yubicoRequest());
+
+        assertThat(required.isCompliant()).isFalse();
+        assertThat(required.getErrors()).containsExactly("FIPS_APPROVED_MODE_NOT_ATTESTED: the Yubico attestation "
+                + "carries no attested FIPS-approved flag (1.3.6.1.4.1.41482.4.12), and "
+                + "gatekeeper.key-policy.require-fips-approved-mode=true requires it to be true");
+        // The attestation itself verified, and the receipt still says what it states.
+        assertThat(required.getKeyProperties().isAttestationChainValid()).isTrue();
+        assertThat(required.getKeyProperties().isPublicKeyMatchesAttestation()).isTrue();
+        assertThat(required.getKeyProperties().isGeneratedOnDevice()).isTrue();
+        assertThat(required.getKeyProperties().isExportable()).isFalse();
+        assertThat(required.getHsmFipsIndicator()).isEqualTo(5);
+        assertThat(required.getHsmFipsApprovedMode()).isNull();
+        assertThat(required.getHsmVendor()).isNull();
+        DoraCompliance dora = required.getDoraCompliance();
+        assertThat(dora.isArticle9_3d()).isTrue();
+        assertThat(dora.isArticle28_1a()).isFalse();
+        assertThat(dora.getSummary()).isEqualTo("Non-compliant: " + required.getErrors().get(0)
+                + ". The attestation evidence verified, but the scheme's policy also requires the attestation "
+                + "to state FIPS-approved mode.");
+
+        // require=false gives the result the default policy gives.
+        VerificationResponse notRequired = service(new KeyPolicy(KeyPolicy.DEFAULT_ALLOWED_KEYS, false),
+                "nofips.jsonl").verify(yubicoRequest());
+        VerificationResponse byDefault = service.verify(yubicoRequest());
+        for (VerificationResponse r : List.of(notRequired, byDefault)) {
+            assertThat(r.isCompliant()).isTrue();
+            assertThat(r.getErrors()).isEmpty();
+        }
+        assertThat(notRequired.getKeyProperties()).isEqualTo(byDefault.getKeyProperties());
+        assertThat(notRequired.getDoraCompliance()).isEqualTo(byDefault.getDoraCompliance());
+        assertThat(notRequired.getWarnings()).isEqualTo(byDefault.getWarnings());
+        assertThat(List.of(notRequired.getHsmVendor(), notRequired.getHsmModel(), notRequired.getHsmSerialNumber(),
+                notRequired.getPublicKeyFingerprint(), notRequired.getHsmFirmwareVersion()))
+                .isEqualTo(List.of(byDefault.getHsmVendor(), byDefault.getHsmModel(), byDefault.getHsmSerialNumber(),
+                        byDefault.getPublicKeyFingerprint(), byDefault.getHsmFirmwareVersion()));
+        assertThat(notRequired.getHsmFipsIndicator()).isEqualTo(byDefault.getHsmFipsIndicator()).isEqualTo(5);
+    }
+
+    @Test
+    void requiringFipsApprovedModeRefusesEveryOtherVendorsGenuineSample() throws Exception {
+        VerificationService required = service(new KeyPolicy("RSA-4096,RSA-2048,EC-secp256r1", true), "fips2.jsonl");
+        var cases = List.of(
+                List.of(securosysRequest(fixture.get("attestationData").asText()), "Securosys"),
+                List.of(thalesRequest(), "Thales"),
+                List.of(crypto4aRequest(), "Crypto4A"),
+                List.of(fortanixRequest(), "Fortanix"));
+        for (List<Object> c : cases) {
+            VerificationResponse receipt = required.verify((VerificationRequest) c.get(0));
+            assertThat(receipt.isCompliant()).as((String) c.get(1)).isFalse();
+            assertThat(receipt.getErrors()).as((String) c.get(1)).containsExactly(
+                    "FIPS_MODE_NOT_IN_ATTESTATION_FORMAT: the " + c.get(1) + " attestation, as this verifier reads "
+                            + "it, carries no statement that the HSM operates in FIPS-approved mode, which "
+                            + "gatekeeper.key-policy.require-fips-approved-mode=true requires");
+            assertThat(receipt.getKeyProperties().isAttestationChainValid()).isTrue();
+            assertThat(receipt.getDoraCompliance().isArticle28_1a()).isFalse();
+        }
+    }
+
     @Test
     void genuineThalesLunaPkcSetsEveryArticleBit() throws Exception {
         VerificationResponse receipt = sampleService.verify(thalesRequest());

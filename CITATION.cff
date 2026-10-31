@@ -4,11 +4,13 @@ type: software
 title: "DORA Attestation Gatekeeper"
 abstract: >-
   Reference implementation of a supervisory gatekeeper for HSM attestation
-  verification under DORA. Operated by the National Competent Authority,
-  the gatekeeper executes a two-step verify/confirm protocol with the
+  verification under DORA. Operated by the National Competent Authority
+  (from 1.7.0 also inside a regulated organisation, profile org), the
+  gatekeeper executes a two-step verify/confirm protocol with the
   financial entity, signs receipts that are independently verifiable
-  against pinned vendor trust anchors (Yubico, Marvell/Cavium, Microsoft
-  Azure, Google Cloud HSM), maintains a hash-chained tamper-evident audit
+  against pinned vendor trust anchors (Securosys, Yubico, Thales Luna,
+  Crypto4A, Fortanix, Entrust nShield, and Marvell/Cavium for Marvell
+  LiquidSecurity, Microsoft Azure and Google Cloud HSM), maintains a hash-chained tamper-evident audit
   log, and enforces NCA-role-based authorisation. Version 1.2.0 added a
   settlement-time signature verification endpoint (POST /api/v1/verify)
   for use by settlement-rail enforcement components such as railgate.
@@ -34,14 +36,28 @@ abstract: >-
   admits only RSA-4096 keys under the default key policy, adds Marvell
   LiquidSecurity, Thales Luna, Crypto4A, Fortanix and Entrust nShield as
   vendors (nine in all), and detects every PIT mutant of its production
-  code. Supports the data-minimised quadruple-
-  triangulation model: only digest, signature, and certificate identifiers
-  traverse the supervisor boundary — transaction payload content is never
-  exposed to the supervisor. Companions: hsm (financial-entity-side HSM
+  code. Version 1.7.0 records the key-lifecycle events signed, rotated,
+  revoked and decommissioned in the audit log, gives each audit entry the
+  key's inventory fields and a per-key chain, signs every settlement
+  verdict, implements the triangulation of bank reports, the operator's
+  report and the registry, adds the organisation-internal profile, lets
+  the log-signing key be held in an HSM and attested at start-up, adds
+  RFC 3161 time-stamping of entries or of the chain head and a COSE_Sign1
+  export, reports YubiHSM 2 firmware and FIPS state, records each pinned
+  trust anchor's manufacturer source (each confirmed against the
+  manufacturer's material), and lets the
+  operator replace a pinned anchor with a root obtained from the
+  manufacturer; the HSM and
+  time-stamping paths are tested only with a test JCA provider and a local
+  time-stamping service. PIT detects every mutant of the 1.7.0 code as well.
+  Its audit log is one of the four data sources of the data-minimised
+  quadruple-triangulation model: at settlement time only digest,
+  signature, and certificate identifiers traverse the supervisor boundary
+  — transaction payload content is never exposed to the supervisor. Companions: hsm (financial-entity-side HSM
   attestation verification) and railgate (central-bank settlement-rail
   enforcement).
-version: "1.6.0"
-date-released: "2026-10-08"
+version: "1.7.0"
+date-released: "2026-10-31"
 license: MIT
 repository-code: "https://github.com/niklasgillstrom/gatekeeper"
 authors:

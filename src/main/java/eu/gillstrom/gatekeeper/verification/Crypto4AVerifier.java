@@ -13,6 +13,7 @@ import org.bouncycastle.asn1.ASN1UTF8String;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.model.HsmVendor;
 
@@ -85,8 +86,34 @@ public class Crypto4AVerifier implements HsmAttestationVerifier {
     /**
      * C4A_RCA, 2020-07-13 to 2045-07-13, from the PKI Consortium's Remote Key
      * Attestation project, validation/crypto4a-qasm.md.
-     * SHA-256 63:7E:6A:7E:95:DE:D7:27:2F:5B:3E:5A:0D:94:41:4D:23:E1:B5:4F:9E:2E:65:93:B6:41:75:62:BB:B5:43:3C
      */
+    // Pinned trust anchor
+    //   Subject:  CN=C4A_RCA,O=Crypto4A,L=Ottawa,ST=Ontario,C=Canada
+    //             (RFC 2253; self-signed)
+    //   SHA-256:  63:7E:6A:7E:95:DE:D7:27:2F:5B:3E:5A:0D:94:41:4D:
+    //             23:E1:B5:4F:9E:2E:65:93:B6:41:75:62:BB:B5:43:3C
+    //             (SHA-256 of the DER certificate)
+    //   Key:      40:14:6C:BF:79:12:E0:A2:9C:A6:01:F9:A1:63:5E:37:
+    //             BA:8D:69:A4:CD:B8:8A:9A:F1:63:16:33:E7:34:9B:F0
+    //             (SHA-256 of the certificate's DER SubjectPublicKeyInfo,
+    //             C4A_ROOT_KEY_SHA256, which the constructor checks)
+    //   Validity: 2020-07-13T13:06:33Z to 2045-07-13T13:06:33Z
+    //   Source:   https://github.com/pkic/remote-key-attestation,
+    //             validation/crypto4a-qasm.md (URL as recorded in
+    //             src/test/resources/vendor-fixtures/crypto4a/NOTICE.md)
+    //   Manufacturer: Crypto4A, https://support.crypto4a.com/cs/Certificate
+    //             (C4A_RCA, beside C4A_RCA_HSS and the firmware trust anchor
+    //             C4A_TA_FW, neither pinned here). Crypto4A also contributed the
+    //             file above, with this root, to the PKI Consortium's repository:
+    //             pull request #21 (https://github.com/pkic/remote-key-attestation/pull/21),
+    //             commit 6a923ce810554c32aea27ad236cee2e5ddd0b14f by
+    //             olivier@crypto4a.com, 2024-06-12.
+    //   Confirmed: the certificate on Crypto4A's page and the one in that
+    //             file are byte-identical to this constant (compared on 2026-10-31).
+    //   Operators: download C4A_RCA from Crypto4A's page and compare its
+    //             SHA-256 with the value above before relying on it.
+    //   Pinned as: the public key; signatures are checked against it.
+    //   Checked by TrustAnchorPinningTest; changing the constant fails the build.
     static final String C4A_ROOT_PEM = """
             -----BEGIN CERTIFICATE-----
             MIICVDCCAdqgAwIBAgIULNg2gybw50xYlV7zvhXBRcggip8wCgYIKoZIzj0EAwMw
@@ -132,9 +159,23 @@ public class Crypto4AVerifier implements HsmAttestationVerifier {
         }
     }
 
+    /**
+     * Anchored at the key of the C4A_RCA in {@code anchors}: the pinned one,
+     * or the operator's replacement ({@link TrustAnchors#CRYPTO4A}).
+     */
+    @Autowired
+    public Crypto4AVerifier(TrustAnchors anchors) {
+        this(anchors.crypto4aRootKey());
+    }
+
     /** For tests: another root key. */
     Crypto4AVerifier(PublicKey rootKey) {
         this.rootKey = rootKey;
+    }
+
+    /** The key this verifier checks the attestation keys' chains against. */
+    PublicKey rootKey() {
+        return rootKey;
     }
 
     @Override

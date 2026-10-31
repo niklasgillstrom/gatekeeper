@@ -201,6 +201,12 @@ public class VerificationService {
         boolean exportable = true;
         String hsmModel = null;
         String hsmSerial = null;
+        // What the attestation states about the HSM's firmware and FIPS mode. Only the
+        // Yubico format carries it, and it counts only from a chain that
+        // validated to the pinned root.
+        String hsmFirmwareVersion = null;
+        Integer hsmFipsIndicator = null;
+        Boolean hsmFipsApprovedMode = null;
 
         switch (vendor) {
             case SECUROSYS -> {
@@ -251,6 +257,11 @@ public class VerificationService {
                 exportable = result.isKeyExportable();
                 hsmModel = "YubiHSM 2";
                 hsmSerial = result.getDeviceSerial();
+                if (result.isChainValid()) {
+                    hsmFirmwareVersion = result.getFirmware();
+                    hsmFipsIndicator = result.getFipsIndicator();
+                    hsmFipsApprovedMode = result.getFipsApprovedMode();
+                }
                 if (!result.isValid()) {
                     errors.addAll(result.getErrors());
                 }
@@ -387,6 +398,15 @@ public class VerificationService {
             }
         }
 
+        // FIPS-approved mode, when the key policy requires the attestation to
+        // state it (gatekeeper.key-policy.require-fips-approved-mode). Like a
+        // key outside the policy, a violation is NON-COMPLIANT whatever else
+        // the attestation shows.
+        String fipsViolation = keyPolicy.fipsModeViolation(vendor, hsmFipsApprovedMode).orElse(null);
+        if (fipsViolation != null) {
+            errors.add(fipsViolation);
+        }
+
         // Determine compliance
         boolean compliant = errors.isEmpty() && publicKeyMatch && attestationChainValid
                 && attestationSignatureValid && generatedOnDevice && !exportable;
@@ -394,7 +414,7 @@ public class VerificationService {
         // Build DORA compliance mapping
         DoraCompliance doraCompliance = buildDoraCompliance(
                 compliant, publicKeyMatch, attestationChainValid, attestationSignatureValid,
-                generatedOnDevice, exportable, keyViolation);
+                generatedOnDevice, exportable, keyViolation, fipsViolation);
 
         // Key properties
         KeyProperties keyProperties = KeyProperties.builder()
@@ -443,6 +463,10 @@ public class VerificationService {
                 .hsmVendor(compliant ? vendor.getVendorName() : null)
                 .hsmModel(compliant ? hsmModel : null)
                 .hsmSerialNumber(compliant ? hsmSerial : null)
+                // Not in the signed canonical form (ReceiptCanonicalizer v3).
+                .hsmFirmwareVersion(hsmFirmwareVersion)
+                .hsmFipsIndicator(hsmFipsIndicator)
+                .hsmFipsApprovedMode(hsmFipsApprovedMode)
                 .keyProperties(keyProperties)
                 .doraCompliance(doraCompliance)
                 .customerOrganisationNumber(request.getCustomerOrganisationNumber())
@@ -514,7 +538,7 @@ public class VerificationService {
 
     private DoraCompliance buildDoraCompliance(boolean compliant, boolean publicKeyMatch,
             boolean chainValid, boolean signatureValid, boolean generatedOnDevice, boolean exportable,
-            String keyViolation) {
+            String keyViolation, String fipsViolation) {
 
         // Article 5(2)(b): High standards for authenticity and integrity
         // Cannot be maintained without verified HSM protection
@@ -547,12 +571,20 @@ public class VerificationService {
             summary = "Signing key is cryptographically proven to be generated and stored in a certified HSM "
                     + "with non-exportable attribute. All DORA requirements for cryptographic key management "
                     + "are independently verifiable.";
-        } else if (keyViolation != null && signatureValid && chainValid && publicKeyMatch && generatedOnDevice
-                && !exportable) {
+        } else if (keyViolation != null && fipsViolation == null && signatureValid && chainValid && publicKeyMatch
+                && generatedOnDevice && !exportable) {
             // The articles above describe the attestation; the key itself is
             // outside the scheme's key policy.
             summary = "Non-compliant: " + keyViolation + ". The attestation evidence verified, but the "
                     + "key is not one the scheme accepts.";
+        } else if (fipsViolation != null && signatureValid && chainValid && publicKeyMatch && generatedOnDevice
+                && !exportable) {
+            // The articles above describe the attestation, which verified; the
+            // scheme's policy also requires it to state FIPS-approved mode.
+            summary = "Non-compliant: " + (keyViolation != null ? keyViolation + ", " : "") + fipsViolation
+                    + ". The attestation evidence verified, but "
+                    + (keyViolation != null ? "the key is not one the scheme accepts, and " : "")
+                    + "the scheme's policy also requires the attestation to state FIPS-approved mode.";
         } else {
             List<String> failures = new ArrayList<>();
             if (!chainValid)
@@ -567,6 +599,8 @@ public class VerificationService {
                 failures.add("key is exportable");
             if (keyViolation != null)
                 failures.add(keyViolation);
+            if (fipsViolation != null)
+                failures.add(fipsViolation);
 
             summary = "Non-compliant: " + String.join(", ", failures) + ". "
                     + "The absence of valid attestation means the financial entity cannot demonstrate compliance "
@@ -693,6 +727,18 @@ public class VerificationService {
      * and surface persistence failures via {@link
      * eu.gillstrom.gatekeeper.audit.AuditLogException}.
      *
+     * <p>Inventory fields (audit entry v2) are copied from the signed
+     * receipt, so the entry states exactly what the receipt states: the
+     * attested key's fingerprint whenever the submitted key parsed, and the
+     * HSM vendor and serial only when the receipt reports them, i.e. when the
+     * verification was compliant. {@code hsmFirmwareVersion} and
+     * {@code hsmFipsApprovedMode} ({@code "true"}, {@code "false"} or
+     * {@code null}) are copied from the receipt's fields of the same name:
+     * set for a Yubico attestation whose chain validated to the pinned root,
+     * whether or not the receipt is compliant, and {@code null} otherwise.
+     * They are outside the receipt's signed canonical form but inside the
+     * audit entry's v2 hash.</p>
+     *
      * <p>The request digest is taken over a deterministic "request fingerprint"
      * built from the country code, the customer's organisation and Swish
      * numbers, the supplier identifier, number and name, vendor, key
@@ -714,7 +760,11 @@ public class VerificationService {
                 verificationId,
                 requestDigestB64,
                 receiptDigestB64,
-                receipt.isCompliant());
+                receipt.isCompliant())
+                .withKeyFingerprintHex(receipt.getPublicKeyFingerprint())
+                .withHsm(receipt.getHsmVendor(), receipt.getHsmSerialNumber())
+                .withHsmFirmware(receipt.getHsmFirmwareVersion(),
+                        receipt.getHsmFipsApprovedMode() == null ? null : receipt.getHsmFipsApprovedMode().toString());
         auditLog.append(req);
     }
 
@@ -725,9 +775,20 @@ public class VerificationService {
      * "loop closed", which every response sets exactly when there are no
      * anomalies; a failed public-key match on an issued certificate always
      * adds one, so it needs no separate term.
+     *
+     * <p>Inventory fields (audit entry v2): {@code keyFingerprintHex} is the
+     * attested key of the registry entry the confirmation resolved to
+     * ({@code null} when it resolved to none), so the entry joins that key's
+     * per-key chain; {@code certSerialHex} and {@code certIssuerDn} are those
+     * of the submitted certificate when it passed PKIX validation against the
+     * trusted issuer CAs ({@code null} otherwise) — whether or not its key
+     * matched, which {@code registryStatus} then says; {@code registryStatus}
+     * is the status in the signed response.</p>
      */
     private void appendConfirmAuditEntry(IssuanceConfirmation confirmation,
-                                         IssuanceConfirmationResponse response) {
+                                         IssuanceConfirmationResponse response,
+                                         String attestedKeyFingerprint,
+                                         ApprovalRegistry.IssuedCertificate validatedCertificate) {
         String requestDigestB64 = sha256Base64(canonicalConfirmationBytes(confirmation));
         boolean confirmCompliant = response.isLoopClosed();
         AuditAppendRequest req = new AuditAppendRequest(
@@ -736,7 +797,13 @@ public class VerificationService {
                 confirmation.getVerificationId(),
                 requestDigestB64,
                 null,
-                confirmCompliant);
+                confirmCompliant)
+                .withKeyFingerprintHex(attestedKeyFingerprint == null || attestedKeyFingerprint.isBlank()
+                        ? null : attestedKeyFingerprint)
+                .withRegistryStatus(response.getRegistryStatus() == null ? null : response.getRegistryStatus().name());
+        if (validatedCertificate != null) {
+            req = req.withCertificate(validatedCertificate.serialHex(), validatedCertificate.issuerDn());
+        }
         auditLog.append(req);
     }
 
@@ -869,7 +936,7 @@ public class VerificationService {
             receiptSigner.signInto(unknownResp);
             // Audit-log the anomaly so a supervisor can detect "fake
             // confirmations" that reference unknown verification IDs.
-            appendConfirmAuditEntry(confirmation, unknownResp);
+            appendConfirmAuditEntry(confirmation, unknownResp, null, null);
             return unknownResp;
         }
 
@@ -879,6 +946,9 @@ public class VerificationService {
         boolean publicKeyMatch = false;
 
         ApprovalRegistry.IssuedCertificate issuedCertificate = null;
+        // The submitted certificate once it has passed issuer-CA validation,
+        // recorded on the CONFIRM audit entry whether or not its key matched.
+        ApprovalRegistry.IssuedCertificate validatedCertificate = null;
 
         if (confirmation.isIssued()
                 && (confirmation.getSigningCertificatePem() == null
@@ -903,6 +973,7 @@ public class VerificationService {
                             + "issuer CA (PKIX validation failed against the configured "
                             + "gatekeeper.confirmation.issuer-ca-bundle-path trust anchors).");
                 } else {
+                    validatedCertificate = ApprovalRegistry.IssuedCertificate.of(submittedCert);
                     PublicKey certPublicKey = submittedCert.getPublicKey();
                     actualFingerprint = fingerprint(certPublicKey);
                     // Constant-time comparison. The values are public
@@ -962,7 +1033,7 @@ public class VerificationService {
                     .anomalies(anomalies)
                     .build();
             receiptSigner.signInto(rejection);
-            appendConfirmAuditEntry(confirmation, rejection);
+            appendConfirmAuditEntry(confirmation, rejection, expectedFingerprint, validatedCertificate);
             return rejection;
         }
 
@@ -998,7 +1069,7 @@ public class VerificationService {
         // Append a CONFIRM audit entry. The audit-log compliance bit
         // captures "loop closed AND no anomalies" so a supervisor can
         // filter the trail by clean vs. anomalous confirmations.
-        appendConfirmAuditEntry(confirmation, resp);
+        appendConfirmAuditEntry(confirmation, resp, expectedFingerprint, validatedCertificate);
 
         return resp;
     }

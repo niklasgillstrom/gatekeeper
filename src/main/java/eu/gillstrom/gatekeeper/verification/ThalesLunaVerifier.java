@@ -2,6 +2,7 @@ package eu.gillstrom.gatekeeper.verification;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.model.HsmVendor;
 
@@ -57,8 +58,40 @@ public class ThalesLunaVerifier implements HsmAttestationVerifier {
      * Chrysalis-ITS Root, serial 80450000000D, 2002-01-01 to 2032-01-01, as
      * published by the PKI Consortium's Remote Key Attestation project
      * (validation/thales-luna7.md).
-     * SHA-256 69:6A:7E:E6:7B:C4:FA:CF:F6:09:11:BC:0B:24:A3:A6:BC:E7:5A:2E:F4:C4:23:18:44:8A:DD:45:01:B6:99:69
      */
+    // Pinned trust anchor
+    //   Subject:  CN=Chrysalis-ITS Root,O=Chrysalis-ITS Inc.,L=Ottawa,ST=Ontario,C=CA
+    //             (RFC 2253; self-signed; serial 80450000000D)
+    //   SHA-256:  69:6A:7E:E6:7B:C4:FA:CF:F6:09:11:BC:0B:24:A3:A6:
+    //             BC:E7:5A:2E:F4:C4:23:18:44:8A:DD:45:01:B6:99:69
+    //             (SHA-256 of the DER certificate)
+    //   Key:      5D:31:FC:46:2A:E8:A1:A5:32:7B:14:9F:F4:3A:A6:D8:
+    //             67:A2:8D:7E:17:CA:1C:CA:7E:7D:51:4C:F8:CD:C1:32
+    //             (SHA-256 of the certificate's DER SubjectPublicKeyInfo,
+    //             CHRYSALIS_ROOT_KEY_SHA256, which the constructor checks)
+    //   Validity: 2002-01-01T00:00:00Z to 2032-01-01T00:00:00Z
+    //   Source:   https://github.com/pkic/remote-key-attestation,
+    //             validation/thales-luna7.md (project URL as recorded in
+    //             src/test/resources/vendor-fixtures/crypto4a/NOTICE.md)
+    //   Manufacturer: Thales publishes safenet-root.pem at
+    //             https://thalesdocs.com/gphsm/luna/10.2/docs/network/Content/admin_partition/confirm/safenet-root.pem,
+    //             the root cmu verifyhsm uses. Compared on 2026-10-31: it is
+    //             another certificate for the same key (serial 804500000007,
+    //             SHA-1 signature, same subject and validity; SHA-256
+    //             80:7E:16:80:AB:0C:93:39:71:FE:70:75:59:5C:10:72:
+    //             E3:18:39:51:A5:A8:AB:53:50:6F:10:93:FE:FF:66:E7), whose
+    //             Key SHA-256 equals the value above. The PKC in Thales's own
+    //             test vector (ThalesGroup/luna-pkc-validator,
+    //             tests/rsa-pkc.p7b; vendor-fixtures/thales-luna) ends in that
+    //             same certificate.
+    //   Operators: this anchor is pinned by its key: compare the Key SHA-256
+    //             of the root you download with the value above. The
+    //             certificate SHA-256 of Thales's file differs from the pinned
+    //             one; loaded as an override it is accepted, and the start-up
+    //             WARN reports it as not the pinned anchor, with the same key.
+    //   Pinned as: the public key; the chain's last signature is checked
+    //             against it.
+    //   Checked by TrustAnchorPinningTest; changing the constant fails the build.
     static final String CHRYSALIS_ROOT_PEM = """
             -----BEGIN CERTIFICATE-----
             MIIGKTCCBBGgAwIBAgIHAIBFAAAADTANBgkqhkiG9w0BAQwFADBqMQswCQYDVQQG
@@ -112,9 +145,24 @@ public class ThalesLunaVerifier implements HsmAttestationVerifier {
         }
     }
 
+    /**
+     * Anchored at the key of the Thales root in {@code anchors}: the pinned
+     * Chrysalis-ITS Root, or the operator's replacement
+     * ({@link TrustAnchors#THALES}).
+     */
+    @Autowired
+    public ThalesLunaVerifier(TrustAnchors anchors) {
+        this(anchors.thalesRootKey());
+    }
+
     /** For tests: another root key. */
     ThalesLunaVerifier(PublicKey rootKey) {
         this.rootKey = rootKey;
+    }
+
+    /** The key the PKC chain must end at. */
+    PublicKey rootKey() {
+        return rootKey;
     }
 
     @Override

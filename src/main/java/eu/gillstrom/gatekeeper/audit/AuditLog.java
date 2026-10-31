@@ -94,7 +94,10 @@ public interface AuditLog {
 
     /**
      * Walk the chain from the first entry to the head and verify
-     * three properties of every entry:
+     * three properties of every entry (implementations may check more —
+     * {@code AppendOnlyFileAuditLog} also checks the per-key links of v2
+     * entries and, when trusted TSA certificates are configured, RFC 3161
+     * tokens):
      * <ol>
      *   <li>{@code prevEntryHashHex} matches the predecessor's
      *       {@code thisEntryHashHex} (or the sentinel for the first
@@ -135,6 +138,17 @@ public interface AuditLog {
      */
     default IntegrityStatus cachedIntegrityStatus() {
         return new IntegrityStatus(verifyChainIntegrity(), Instant.now());
+    }
+
+    /**
+     * Number of entries in the chain that carry no RFC 3161 timestamp token
+     * ({@code timestampTokenBase64 == null}), for
+     * {@code GET /v1/gatekeeper/health} under
+     * {@code gatekeeper.timestamping.mode=entry}. Empty when the
+     * implementation does not track it.
+     */
+    default java.util.OptionalLong untimestampedEntryCount() {
+        return java.util.OptionalLong.empty();
     }
 
     /**

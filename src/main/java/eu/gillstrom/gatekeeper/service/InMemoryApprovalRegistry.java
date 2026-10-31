@@ -189,6 +189,33 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
         return Optional.of(entry);
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Runs under the same lock as {@link #confirm}, so the transition
+     * check and the change are one step.</p>
+     */
+    @Override
+    public StatusChange changeStatus(String verificationId, RegistryStatus target, String reason,
+                                     String successorVerificationId) {
+        if (!ApprovalRegistry.isLifecycleStatus(target)) {
+            throw new IllegalArgumentException("Not a lifecycle status: " + target);
+        }
+        synchronized (confirmLock) {
+            RegistryEntry entry = entries.get(verificationId);
+            if (entry == null) {
+                return StatusChange.notFound();
+            }
+            RegistryStatus current = entry.getStatus();
+            if (!ApprovalRegistry.isAllowedStatusChange(current, target)) {
+                return StatusChange.refused(current);
+            }
+            String changedAt = Instant.now().toString();
+            ApprovalRegistry.applyStatusChange(entry, target, changedAt, reason, successorVerificationId);
+            return StatusChange.applied(current, target, changedAt);
+        }
+    }
+
     @Override
     public Optional<RegistryEntry> lookup(String verificationId) {
         return Optional.ofNullable(entries.get(verificationId));
@@ -260,7 +287,7 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
         List<RegistryEntry> countryEntries = findByCountry(countryCode);
         long total = countryEntries.size();
         long compliant = countryEntries.stream()
-                .filter(e -> e.getStatus() == RegistryStatus.VERIFIED_AND_ISSUED)
+                .filter(e -> ApprovalRegistry.wasVerifiedAndIssued(e.getStatus()))
                 .count();
         long anomalies = countryEntries.stream()
                 .filter(e -> e.getStatus() != null && e.getStatus().name().startsWith("ANOMALY"))

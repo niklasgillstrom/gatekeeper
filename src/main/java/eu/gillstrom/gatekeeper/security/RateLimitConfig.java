@@ -15,12 +15,18 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
  *       railgate calls.</li>
  *   <li>{@code /v1/audit/**} — supervisory audit queries, including
  *       {@code /v1/audit/export}, which serialises the entire chain.</li>
- *   <li>{@code /v1/gatekeeper/**} — key directory, chain anchor and
+ *   <li>{@code /v1/gatekeeper/**} — key directory, chain anchor, the
+ *       RFC 3161 anchor list ({@code /anchor/timestamps}) and
  *       health. {@code /anchor} produces a signature per call and
  *       {@code /health} reads the chain's integrity state; neither was
  *       under any limit, and {@code /keys} and {@code /anchor} are
  *       reachable without authentication by design.</li>
+ *   <li>{@code /v1/triangulation/**} — data triangulation inquiries,
+ *       limited under the {@code audit} bucket.</li>
  * </ul>
+ *
+ * <p>{@code POST /v1/attestation/&#x7b;cc&#x7d;/lifecycle} is covered by the
+ * first pattern and limited under its own {@code lifecycle} bucket.</p>
  *
  * <p>Only the first pattern was registered until an independent review
  * pointed out the gap. {@code /api/v1/verify} sits in the payment path and
@@ -45,6 +51,6 @@ public class RateLimitConfig implements WebMvcConfigurer {
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(rateLimitInterceptor)
                 .addPathPatterns("/v1/attestation/**", "/api/v1/**", "/v1/audit/**",
-                        "/v1/gatekeeper/**");
+                        "/v1/gatekeeper/**", "/v1/triangulation/**");
     }
 }

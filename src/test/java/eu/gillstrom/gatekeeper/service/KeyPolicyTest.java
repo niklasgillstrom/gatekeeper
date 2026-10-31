@@ -45,4 +45,31 @@ class KeyPolicyTest {
         assertThatThrownBy(() -> new KeyPolicy(" , ")).isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(() -> new KeyPolicy(null)).isInstanceOf(IllegalStateException.class);
     }
+
+    @Test
+    void fipsApprovedModeIsNotRequiredByDefaultAndThenOnlyYubicoCanMeetIt() {
+        for (KeyPolicy off : new KeyPolicy[] {KeyPolicy.defaults(), new KeyPolicy("RSA-4096"),
+                new KeyPolicy("RSA-4096", false)}) {
+            assertThat(off.requiresFipsApprovedMode()).isFalse();
+            for (eu.gillstrom.gatekeeper.model.HsmVendor v : eu.gillstrom.gatekeeper.model.HsmVendor.values()) {
+                assertThat(off.fipsModeViolation(v, null)).as(v.name()).isEmpty();
+                assertThat(off.fipsModeViolation(v, Boolean.FALSE)).as(v.name()).isEmpty();
+            }
+        }
+        KeyPolicy on = new KeyPolicy("RSA-4096", true);
+        assertThat(on.requiresFipsApprovedMode()).isTrue();
+        for (eu.gillstrom.gatekeeper.model.HsmVendor v : eu.gillstrom.gatekeeper.model.HsmVendor.values()) {
+            if (v == eu.gillstrom.gatekeeper.model.HsmVendor.YUBICO) {
+                assertThat(on.fipsModeViolation(v, Boolean.TRUE)).isEmpty();
+                assertThat(on.fipsModeViolation(v, Boolean.FALSE)).get().asString()
+                        .startsWith(KeyPolicy.FIPS_APPROVED_MODE_NOT_ATTESTED + ": ");
+                assertThat(on.fipsModeViolation(v, null)).get().asString()
+                        .startsWith(KeyPolicy.FIPS_APPROVED_MODE_NOT_ATTESTED + ": ");
+            } else {
+                // A statement passed for another vendor does not count: its format has none this verifier reads.
+                assertThat(on.fipsModeViolation(v, Boolean.TRUE)).as(v.name()).get().asString()
+                        .startsWith(KeyPolicy.FIPS_MODE_NOT_IN_ATTESTATION_FORMAT + ": ");
+            }
+        }
+    }
 }
