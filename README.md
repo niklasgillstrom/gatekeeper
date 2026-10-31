@@ -603,7 +603,7 @@ Every confirmation response carries `signature` and `signingCertificate` *(since
 
 `registryStatus` is one of: `VERIFIED_AND_ISSUED`, `VERIFIED_NOT_ISSUED`, `REJECTED_NOT_ISSUED`, `ANOMALY_ISSUED_DESPITE_REJECTION`, `ANOMALY_PUBLIC_KEY_MISMATCH`, `ANOMALY_UNKNOWN_VERIFICATION` (answered with `404`), `ANOMALY_NONCE_MISMATCH` (see `IssuanceConfirmationResponse.RegistryStatus`). Since 1.7.0 the enum also has `SUPERSEDED`, `REVOKED` and `DECOMMISSIONED`, which only a key-lifecycle event sets (see `POST /v1/attestation/{countryCode}/lifecycle` below); a Step 7 confirmation never produces them. `ANOMALY_NONCE_MISMATCH` is the `400` answer to a confirmation whose `confirmationNonce` does not match the one bound at verify time; the registry entry is left unchanged, and from 1.5.0 the attempt is written to the audit log as a `CONFIRM` entry with `compliant=false` (before 1.5.0 it reached only the application log, and the `400` body said `ANOMALY_PUBLIC_KEY_MISMATCH`). `loopClosed` is `true` iff the confirmation was consistent with the registry entry and passed all binding checks; any anomaly sets it to `false` and the entry remains flagged for supervisory review.
 
-#### POST /api/v1/verify (settlement-time signature verification, since v1.2.0)
+#### POST /api/v1/verify (settlement-time signature verification, since v1.1.0)
 
 Companion endpoint to the issuance-time attestation flow. Whereas the `/v1/attestation/{countryCode}/verify` endpoint runs the 7-step verification protocol at certificate issuance, this endpoint answers a different question at settlement time: *given a digest, signature, and certificate, is the signature valid and is the certificate compliant?*
 

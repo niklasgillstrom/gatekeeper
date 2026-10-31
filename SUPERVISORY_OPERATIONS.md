@@ -205,7 +205,7 @@ What the inquiry does not do: compare the certificate fields the banks report (t
 
 The trigger thresholds for moving up the trappa (e.g. ≥ 3 unmatched certs in one quarter, ≥ 1 unmatched cert with confirmed payment usage) are supervisory-policy decisions and should be documented in the NCA's internal sanctions-policy guidance separately from this runbook.
 
-### 3.6 Settlement-time signature verification (since v1.2.0)
+### 3.6 Settlement-time signature verification (since v1.1.0)
 
 Scenario: the central-bank settlement-rail operator (Sveriges Riksbank for RIX-INST) deploys the railgate companion artefact in front of the settlement pipeline. For every regulated payment, railgate retrieves the SHA-512 digest, signature, and certificate identifiers from the payment-network operator (Getswish AB in the Swedish reference deployment) and submits them to the gatekeeper's `POST /api/v1/verify` endpoint at settlement time.
 

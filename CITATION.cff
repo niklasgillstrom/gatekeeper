@@ -11,7 +11,7 @@ abstract: >-
   against pinned vendor trust anchors (Securosys, Yubico, Thales Luna,
   Crypto4A, Fortanix, Entrust nShield, and Marvell/Cavium for Marvell
   LiquidSecurity, Microsoft Azure and Google Cloud HSM), maintains a hash-chained tamper-evident audit
-  log, and enforces NCA-role-based authorisation. Version 1.2.0 added a
+  log, and enforces NCA-role-based authorisation. Version 1.1.0 added a
   settlement-time signature verification endpoint (POST /api/v1/verify)
   for use by settlement-rail enforcement components such as railgate.
   Version 1.4.0 fixes a start-up failure in 1.3.0 (duplicate key in

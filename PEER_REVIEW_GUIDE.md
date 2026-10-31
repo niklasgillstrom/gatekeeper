@@ -3,7 +3,7 @@
 This document is written for a peer reviewer of Article 1 (Gillström, in preparation; target venue: *Capital Markets Law Journal*) and Article 2 (Gillström, in preparation; target venue: *Computer Law & Security Review*) who wants to reproduce the central gatekeeper-level verification claims these articles make. Companion repos `hsm/` and `railgate/` complete the **triadic system** described in Article 1 §4.3 and §6.2 and Article 2 §9.3 (section numbers of the manuscripts revised on 2026-10-30):
 
 - **hsm** carries the verifier core (financial-entity side).
-- **gatekeeper** (this repo) is the NCA-facing supervisory API that wraps those verifiers for regulatory use, and from v1.2.0 also exposes the settlement-time signature verification endpoint that railgate consumes.
+- **gatekeeper** (this repo) is the NCA-facing supervisory API that wraps those verifiers for regulatory use, and from v1.1.0 also exposes the settlement-time signature verification endpoint that railgate consumes.
 - **railgate** is the central-bank settlement-rail enforcement layer that calls gatekeeper's verification endpoint at settlement time (RIX-INST in Sweden; generalisable to TIPS, FedNow, FPS, NPP).
 
 The three components together operationalise the data-minimised quadruple-triangulation model over four data sources — Getswish AB's allocation register, the gatekeeper audit log, the RIX-INST settlement log and the recipient-side transaction registration — of which this repository produces the gatekeeper audit log; the other three are external. At settlement time only digest, signature, and certificate identifiers traverse the supervisor boundary — no transaction payload content is exposed at any layer.
