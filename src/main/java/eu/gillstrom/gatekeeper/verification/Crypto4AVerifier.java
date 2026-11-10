@@ -333,7 +333,9 @@ public class Crypto4AVerifier implements HsmAttestationVerifier {
                 }
                 current = issuer;
             } catch (Exception e) {
-                return e.getMessage();
+                // Never null: null is this method's "no error". An exception
+                // without a message would otherwise have read as a valid chain.
+                return String.valueOf(e);
             }
         }
         return "chain longer than " + MAX_CHAIN_DEPTH;

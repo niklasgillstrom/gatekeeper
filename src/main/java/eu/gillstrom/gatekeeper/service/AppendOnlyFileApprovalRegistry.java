@@ -15,10 +15,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.model.IssuanceConfirmationResponse.RegistryStatus;
+import eu.gillstrom.gatekeeper.util.JournalAppender;
 
 import javax.security.auth.x500.X500Principal;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -44,7 +44,11 @@ import java.util.stream.Collectors;
  * {@code gatekeeper.registry.path} that records every {@code register}
  * and {@code confirm} operation. The journal is fsynced before each
  * write returns, so a crash after a successful return cannot lose the
- * record.</p>
+ * record. A write that fails leaves no part of its line in the file, and
+ * what a stopped process left after the last newline is removed by the
+ * next write ({@link JournalAppender}); until 1.7.0 the next write
+ * continued on that line, and the record it acknowledged was skipped as
+ * malformed at the next start.</p>
  *
  * <h2>Journal format</h2>
  *
@@ -83,9 +87,10 @@ import java.util.stream.Collectors;
  * ({@link ApprovalRegistry#isAllowedStatusChange}); otherwise it is logged at
  * WARN and skipped.</p>
  *
- * <p>Permissions: when the file is created the implementation attempts
- * to set POSIX permissions to {@code 0640}. On non-POSIX filesystems
- * this step is logged at WARN and execution continues.</p>
+ * <p>Permissions: at every start, for a new journal and for an existing
+ * one, the implementation attempts to set POSIX permissions to
+ * {@code 0640}. On non-POSIX filesystems this step is logged at WARN and
+ * execution continues.</p>
  *
  * <p>Concurrency: writes are serialised under a {@link ReentrantLock};
  * reads return snapshots from the in-memory index.</p>
@@ -103,6 +108,7 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
     private static final String OP_STATUS_CHANGE = "STATUS_CHANGE";
 
     private final Path journalPath;
+    private final JournalAppender journal;
     private final ObjectMapper json;
     private final ConcurrentHashMap<String, RegistryEntry> entries = new ConcurrentHashMap<>();
     private final ReentrantLock writeLock = new ReentrantLock();
@@ -110,6 +116,7 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
     public AppendOnlyFileApprovalRegistry(
             @Value("${gatekeeper.registry.path:/var/lib/gatekeeper/approval-registry.jsonl}") String path) {
         this.journalPath = Paths.get(path);
+        this.journal = new JournalAppender(journalPath);
         @SuppressWarnings("deprecation")
         ObjectMapper mapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule())
@@ -132,18 +139,25 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
             return;
         }
 
+        // As for a new journal, and as the audit log does at every start:
+        // until 1.7.0 the permissions were set only when the file was created.
+        applyPosixPermissions(journalPath);
+
         // Replay the journal to rebuild the in-memory index.
         int registerCount = 0;
         int confirmCount = 0;
         int statusChangeCount = 0;
         int skipped = 0;
+        boolean lastLineIsARecord = false;
         try (var lines = Files.lines(journalPath, StandardCharsets.UTF_8)) {
             for (String line : (Iterable<String>) lines::iterator) {
                 if (line.isBlank()) {
                     continue;
                 }
+                lastLineIsARecord = false;
                 try {
                     JsonNode op = json.readTree(line);
+                    lastLineIsARecord = true;
                     String opType = op.path("op").asText();
                     if (OP_REGISTER.equals(opType)) {
                         RegistryEntry entry = json.treeToValue(op.path("entry"), RegistryEntry.class);
@@ -183,6 +197,13 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
                     skipped++;
                 }
             }
+        }
+        // A last line that is a whole record but has no newline after it was
+        // read and applied above. It gets its newline now: the next append
+        // removes whatever follows the last newline (JournalAppender). A last
+        // line that is not a record is left for that append to remove.
+        if (lastLineIsARecord && journal.terminateLastLine()) {
+            log.warn("Replay: the last record of {} was not followed by a newline; one was added", journalPath);
         }
         log.info("AppendOnlyFileApprovalRegistry initialised: replayed {} REGISTER + {} CONFIRM ops "
                 + "+ {} STATUS_CHANGE ops from {} ({} entries in index, {} skipped)",
@@ -362,6 +383,11 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
             String confirmationTimestamp = Instant.now().toString();
             boolean storesCertificate = issuedCertificate != null
                     && entry.isCompliant() && issued && publicKeyMatch;
+            if (storesCertificate) {
+                // Before the journal append: a refused confirmation is no
+                // state transition, exactly like a nonce mismatch.
+                ApprovalRegistry.requireCertificateNotRegistered(entries.values(), verificationId, issuedCertificate);
+            }
             appendOp(OP_CONFIRM, verificationId, mapper -> {
                 ObjectNode op = mapper
                         .createObjectNode()
@@ -496,13 +522,7 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
         writeLock.lock();
         try {
             JsonNode op = builder.build(json);
-            byte[] payload = (json.writeValueAsString(op) + "\n").getBytes(StandardCharsets.UTF_8);
-
-            try (RandomAccessFile raf = new RandomAccessFile(journalPath.toFile(), "rwd")) {
-                raf.seek(raf.length());
-                raf.write(payload);
-                raf.getFD().sync();
-            }
+            journal.appendLine(json.writeValueAsString(op));
             log.debug("Registry append: op={} verificationId={}", opType, verificationId);
         } catch (IOException e) {
             throw new IllegalStateException(
@@ -573,7 +593,7 @@ public class AppendOnlyFileApprovalRegistry implements ApprovalRegistry {
     public Optional<RegistryEntry> findByIssuedCertificate(BigInteger serial, X500Principal issuer) {
         return entries.values().stream()
                 .filter(e -> ApprovalRegistry.issuedCertificateMatches(e, serial, issuer))
-                .max(ApprovalRegistry.recency());
+                .max(ApprovalRegistry.certificatePrecedence());
     }
 
     @Override

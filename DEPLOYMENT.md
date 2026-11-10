@@ -26,13 +26,13 @@ mvn -U clean package
 NVD_API_KEY=... mvn -Powasp verify
 ```
 
-The artefact lands in `target/gatekeeper-1.7.0.jar`. (The 1.7.0 dependency versions — Spring Boot 4.1.2, Jackson 3.2.4 / 2.22.4, swagger-ui 5.34.1, maven-enforcer-plugin 3.7.0 — were not available to the build that produced the 1.7.0 test results, which ran against the 1.6.0 versions; build and test once with network access before deploying.)
+The artefact lands in `target/gatekeeper-1.8.0.jar`. (The 1.7.0 dependency versions — Spring Boot 4.1.2, Jackson 3.2.4 / 2.22.4, swagger-ui 5.34.1, maven-enforcer-plugin 3.7.0 — were not available to the build that produced the 1.7.0 test results, which ran against the 1.6.0 versions; build and test once with network access before deploying.)
 
 ### 1.2 Runtime environment (production host)
 
 - **Java 21** runtime.
-- **Filesystem** for persistent state. The audit log and approval registry are append-only journals; total size grows ~1–2 KB per supervisory decision, so a 10 GB partition holds approximately 5–10 million decisions before rotation is required (well above the DORA Article 28(6) 5-year retention horizon for any realistic supervisee population).
-- **Service account** with ownership of the journal directory. POSIX permissions on the journal files are enforced to `0640` by the gatekeeper at startup; the parent directory should be `0750`.
+- **Filesystem** for persistent state. The audit log and approval registry are append-only journals; the audit log grows ~1–2 KB per supervisory decision. The registry journal grows by less than 1 KB for a refused verification and, for an approved one, by the size of the submitted request, which it keeps as evidence: a few kilobytes for a real attestation, and at most about half a megabyte, the sum of the request's field limits. (Until 1.7.0 this item gave 1–2 KB per decision for both files, while the journal kept the whole request of every verification, refused ones included.) Size the partition from the number of approved keys and the size of their attestations.
+- **Service account** with ownership of the journal directory. POSIX permissions on the journal files are enforced to `0640` by the gatekeeper at startup (until 1.7.0 the approval-registry journal was set only when the gatekeeper created it; since 1.8.0 it is set at every start, as the audit log is); the parent directory should be `0750`.
 - **Time synchronisation.** Audit entries carry `Instant` timestamps; deploy with NTP or PTP (the case-study deployment uses GPS-PPS per `HARDWARE_BASELINE.md` §3.1). The settlement verdict's `verifiedAt` is checked by railgate against its own clock (default ±60 s), so the two hosts' clocks must agree within that window.
 - **Network reach to a TSA**, if RFC 3161 time-stamping is enabled (§2.6).
 - **Reverse proxy or load balancer that does NOT terminate TLS.** Client certificates must reach the gatekeeper's Tomcat connector unchanged for mTLS to function. If a reverse proxy is in front, configure pass-through TLS (TCP-level), not HTTP termination.
@@ -59,12 +59,16 @@ Source: an internal or public CA, depending on the NCA's policy. Subject CN shou
 
 ### 2.3 Client-trust keystore (`GATEKEEPER_TRUSTSTORE`)
 
-Holds the **CA certificates** that issued the client certificates the gatekeeper will accept. This is what enforces who is allowed to connect — financial entities (FE) and supervisors (SUPERVISOR).
+Holds the **CA certificates** that issued the client certificates the gatekeeper will accept. This is what enforces who is allowed to connect — and, because roles follow the certificate's subject, who can be given which role.
 
-Typically contains:
+A client's role (`SUPERVISOR`, `FE`, `SETTLEMENT_RAIL`) and the principal that binds a verification to its confirmation and its lifecycle events are both read from one subject attribute of the client certificate (`gatekeeper.security.mtls.principal-attribute`, Section 4). The issuing CA is not part of that decision: a certificate from any CA in this truststore whose subject matches the `SUPERVISOR` mapping is a supervisor. **Every CA placed here is therefore trusted to issue certificates for every role and every principal.**
 
-- The NCA's internal CA (issues SUPERVISOR client certs to NCA staff).
-- The CA(s) that issue FE client certs to supervisees who will call `verify`/`confirm`. In Sweden this might be the FE's own internal CA, or a domestic CA that the NCA has registered.
+Place here only:
+
+- the NCA's own CA, which issues the client certificates of NCA staff, supervisees and the settlement rail; or
+- a CA whose validation of that subject attribute the NCA relies on for all its clients — for example a public CA that verifies the organisation number it writes into `SERIALNUMBER`, as in the Expisoft examples in Section 4.
+
+Do not place a supervisee's own internal CA here. It could issue a certificate whose subject matches the supervisor mapping, or another financial entity's principal. *(Corrected in 1.8.0: this section used to name "the FE's own internal CA" as a typical entry, which contradicted `THREAT_MODEL.md`, where client certificates are NCA-issued. Binding a role to the CA a certificate chains to is not implemented.)*
 
 ### 2.4 Issuer-CA bundle (`gatekeeper.confirmation.issuer-ca-bundle-path`)
 
@@ -72,7 +76,7 @@ Holds the **CA certificates that the gatekeeper accepts as legitimate issuers** 
 
 A bundle certificate that is issued by another certificate in the same bundle is used as an intermediate; every other bundle certificate is a trust anchor. At Step 7 the gatekeeper builds a PKIX path from the submitted certificate to a trust anchor, using as intermediates the bundle's intermediates and any further certificates the FE sends after the signing certificate in `signingCertificatePem`.
 
-A sample `issuer-ca-bundle.pem` ships in the classpath as a placeholder: Getswish Root CA v2 for Swish as trust anchor and Swish Customer CA1 v2 for Swish, the CA that issues Swish signing certificates, as intermediate. Production deployments override the path to point at the operator-controlled bundle.
+A sample `issuer-ca-bundle.pem` ships in the classpath as a placeholder: Getswish Root CA v2 for Swish as trust anchor and Swish Customer CA1 v2 for Swish, the CA that issues Swish signing certificates, as intermediate. Production deployments override the path to point at the operator-controlled bundle. Once the path is set, the file it names is the bundle: if it is not a file, or holds no certificate, the gatekeeper does not start (since 1.8.0; until 1.7.0 it logged a WARN and ran on the placeholder).
 
 ### 2.5 Receipt-signing key in an HSM, and its attestation *(since 1.7.0; optional, off by default)*
 
@@ -110,10 +114,11 @@ The attestation is verified once, at start-up, with the same verifier the gateke
 | `gatekeeper.timestamping.hash-algorithm` | `SHA-256` | the only accepted value |
 | `gatekeeper.timestamping.policy-oid` | empty | sent as `reqPolicy` and checked on the response when the token is obtained |
 | `gatekeeper.timestamping.connect-timeout-ms` / `read-timeout-ms` | `5000` / `10000` | TSA connection timeouts |
+| `gatekeeper.timestamping.entry-token-tolerance-seconds` | `300` | how far an entry token's `genTime` may be from the entry's own timestamp, in either direction (> 0); applied when a token is stored and by the chain check *(since 1.8.0)* |
 | `gatekeeper.timestamping.anchor-interval-seconds` | `3600` | anchor mode: interval between attempts (> 0) |
 | `gatekeeper.timestamping.anchor-path` | `<gatekeeper.audit.path>.tsa-anchors.jsonl` | anchor mode: the anchor record file, created on the first anchor (0640) |
 
-`entry` gives every new audit entry a token over SHA-256 of its signature input. The TSA call is made while the append lock is held, so each audited request can wait up to the sum of the timeouts; a TSA failure writes the entry without a token, counted by `untimestampedEntries` on `/v1/gatekeeper/health`. Size the timeouts accordingly, or use `anchor`. `anchor` time-stamps the chain head at start-up and then every interval when the head has moved; records are fsynced to the anchor file and served on `GET /v1/gatekeeper/anchor/timestamps`. Each token is validated before it is stored. Misconfiguration (unknown mode, missing URL or trust file, a non-http(s) URL, another hash algorithm, an unparseable policy OID, non-positive timeouts or interval, an unreadable trust file, an anchor file with an unparseable line before the last) stops start-up; a torn last anchor line is removed with a WARN. TSA certificate revocation is not checked. A qualified TSA is chosen through `tsa-url` and `trusted-certs-path`; **only a local BouncyCastle TSA has been used in tests.**
+`entry` gives every new audit entry a token over SHA-256 of its signature input. The TSA call is made while the append lock is held, so each audited request can wait up to the sum of the timeouts; a TSA failure writes the entry without a token, counted by `untimestampedEntries` on `/v1/gatekeeper/health`. Size the timeouts accordingly, or use `anchor`. An entry token is kept only if its `genTime` is within `entry-token-tolerance-seconds` of the entry's timestamp, and the chain check refuses a stored entry token that is not *(since 1.8.0)*: the host clock must therefore follow the TSA's. If the two differ by more than the tolerance, new entries are written without tokens (WARN "compare the clock of this host with the TSA's"); if entries written by 1.7.0 carry tokens further off than that, the chain check reports them after the upgrade until the tolerance is raised to cover the difference that existed. `anchor` time-stamps the chain head at start-up and then every interval when the head has moved; records are fsynced to the anchor file and served on `GET /v1/gatekeeper/anchor/timestamps`. Each token is validated before it is stored. Misconfiguration (unknown mode, missing URL or trust file, a non-http(s) URL, another hash algorithm, an unparseable policy OID, non-positive timeouts, interval or entry-token tolerance, an unreadable trust file, an anchor file with an unparseable line before the last) stops start-up; a torn last anchor line is removed with a WARN. TSA certificate revocation is not checked. A qualified TSA is chosen through `tsa-url` and `trusted-certs-path`; **only a local BouncyCastle TSA has been used in tests.**
 
 ### 2.7 Trust anchors obtained from the manufacturers *(since 1.7.0; optional)*
 
@@ -284,7 +289,7 @@ The first startup of a new deployment should follow this sequence to verify the 
 
 ```bash
 # 1. Verify the JAR exists and has the right version
-java -jar target/gatekeeper-1.7.0.jar --version 2>&1 | head
+java -jar target/gatekeeper-1.8.0.jar --version 2>&1 | head
 
 # 2. Pre-flight: keystore reachability and password correctness
 keytool -list -keystore "$GATEKEEPER_SEAL_KEYSTORE" -storepass "$GATEKEEPER_SEAL_KEYSTORE_PASSWORD" -storetype PKCS12
@@ -292,7 +297,7 @@ keytool -list -keystore "$GATEKEEPER_SERVER_KEYSTORE" -storepass "$GATEKEEPER_SE
 keytool -list -keystore "$GATEKEEPER_TRUSTSTORE" -storepass "$GATEKEEPER_TRUSTSTORE_PASSWORD" -storetype PKCS12
 
 # 3. Boot with the NCA profile
-java -jar target/gatekeeper-1.7.0.jar --spring.profiles.active=nca
+java -jar target/gatekeeper-1.8.0.jar --spring.profiles.active=nca
 
 # 4. In another shell, smoke-test the endpoints that need no role. The nca
 #    profile still requires a client certificate at the TLS layer

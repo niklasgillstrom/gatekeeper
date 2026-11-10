@@ -157,6 +157,12 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
             throw new NonceMismatchException(verificationId);
         }
 
+        // An issued certificate is stored on one entry only. Checked before
+        // the nonce is spent: a refused confirmation changes nothing.
+        if (issuedCertificate != null && entry.isCompliant() && issued && publicKeyMatch) {
+            ApprovalRegistry.requireCertificateNotRegistered(entries.values(), verificationId, issuedCertificate);
+        }
+
         // The nonce has now been spent. Clearing it makes confirm single-use:
         // a replayed request finds a null expectedNonce and is rejected above.
         // Safe to clear here because there is nothing left that can fail:
@@ -279,7 +285,7 @@ public class InMemoryApprovalRegistry implements ApprovalRegistry {
     public Optional<RegistryEntry> findByIssuedCertificate(BigInteger serial, X500Principal issuer) {
         return entries.values().stream()
                 .filter(e -> ApprovalRegistry.issuedCertificateMatches(e, serial, issuer))
-                .max(ApprovalRegistry.recency());
+                .max(ApprovalRegistry.certificatePrecedence());
     }
 
     @Override

@@ -183,7 +183,8 @@ gatekeeper:
   #            all on GET /v1/gatekeeper/anchor/timestamps (public).
   # entry and anchor require tsa-url and trusted-certs-path; start-up fails
   # without them. When trusted-certs-path is set, the chain-integrity check
-  # validates every stored token (imprint, signature, chain to these certs).
+  # validates every stored token (imprint, signature, chain to these certs)
+  # and requires an entry token to be of the entry's time (entry-token-tolerance-seconds).
   #
   #   Example: entry mode
   #     timestamping:
@@ -194,6 +195,7 @@ gatekeeper:
   #       connect-timeout-ms: 5000
   #       read-timeout-ms: 10000
   #       trusted-certs-path: /etc/gatekeeper/tsa-trust.pem   # TSA certificate and/or its CA(s)
+  #       entry-token-tolerance-seconds: 300   # an entry token's genTime must be this close to the entry's timestamp
   #
   #   Example: anchor mode
   #     timestamping:

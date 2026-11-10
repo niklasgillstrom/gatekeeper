@@ -81,7 +81,9 @@ import java.util.function.Function;
  * are in the order of their lines here. The
  * signature, its algorithm and {@code auditEntryHashHex} are not part of the
  * form; {@code canonicalVersion}, {@code discrepancyCount} and
- * {@code zeroDiscrepancies} are fixed by it.</p>
+ * {@code zeroDiscrepancies} are fixed by it ({@code zeroDiscrepancies} by the
+ * {@code total} line and by the {@code in|bank} and {@code in|operator}
+ * lines, which show whether both sides have reported).</p>
  */
 public final class TriangulationCanonicalizer {
 

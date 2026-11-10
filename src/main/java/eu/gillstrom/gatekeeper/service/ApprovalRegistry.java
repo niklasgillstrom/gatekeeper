@@ -14,6 +14,7 @@ import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
@@ -129,6 +130,9 @@ public interface ApprovalRegistry {
      * every field of the audited request digest, so it can show that what it
      * keeps is what was checked ({@code VerificationService.requestDigestBase64}).
      * The two shipped registries store it; this default drops it.
+     * {@code VerificationService} passes it for an approved key only.
+     *
+     * @param submission the request to keep, or {@code null} to keep none
      */
     default RegistryEntry register(String verificationId,
                                    String confirmationNonce,
@@ -181,13 +185,23 @@ public interface ApprovalRegistry {
      * {@link #findByIssuedCertificate(BigInteger, X500Principal)} can
      * resolve a settlement-time request that carries only the certificate
      * serial and issuer DN. {@code null} stores nothing.</p>
+     *
+     * <p>An issued certificate is stored on one entry only. A confirmation
+     * that would store a certificate another entry already holds is refused
+     * with {@link CertificateAlreadyRegisteredException}: the entry and its
+     * nonce are left as they were and nothing is journalled. The check and
+     * the store are one atomic step. Until 1.7.0 such a confirmation created
+     * a second, newer entry, which settlement and key-lifecycle events then
+     * followed instead of the original one — so repeating verification and
+     * confirmation brought a revoked certificate back.</p>
      */
     Optional<RegistryEntry> confirm(String verificationId,
                                     String submittedNonce,
                                     boolean issued,
                                     String actualPublicKeyFingerprint,
                                     boolean publicKeyMatch,
-                                    IssuedCertificate issuedCertificate) throws NonceMismatchException;
+                                    IssuedCertificate issuedCertificate)
+            throws NonceMismatchException, CertificateAlreadyRegisteredException;
 
     default Optional<RegistryEntry> confirm(String verificationId,
                                             String submittedNonce,
@@ -209,6 +223,18 @@ public interface ApprovalRegistry {
         public NonceMismatchException(String verificationId) {
             super("Submitted confirmation nonce does not match the nonce bound at verify time for verificationId="
                     + verificationId);
+        }
+    }
+
+    /**
+     * Thrown by {@link #confirm} when the certificate it would store is
+     * already stored on another entry. No state transition has occurred:
+     * the entry is still awaiting confirmation and its nonce is unspent.
+     */
+    class CertificateAlreadyRegisteredException extends RuntimeException {
+        public CertificateAlreadyRegisteredException(String verificationId, String holderVerificationId) {
+            super("The certificate confirmed for verificationId=" + verificationId
+                    + " is already registered under verificationId=" + holderVerificationId);
         }
     }
 
@@ -421,6 +447,53 @@ public interface ApprovalRegistry {
         }
     }
 
+    /**
+     * Refuse a confirmation that would store {@code certificate} when an
+     * entry already stores it. Both registries call it from {@link #confirm},
+     * under the lock that also covers the store, before anything is changed
+     * or journalled.
+     *
+     * <p>A certificate whose serial or issuer is absent or does not parse is
+     * let through: stored like that it matches no lookup, so no entry can
+     * hold it.</p>
+     */
+    static void requireCertificateNotRegistered(Collection<RegistryEntry> entries, String verificationId,
+                                                IssuedCertificate certificate) {
+        if (certificate.serialHex() == null || certificate.issuerDn() == null) {
+            return;
+        }
+        BigInteger serial;
+        X500Principal issuer;
+        try {
+            serial = new BigInteger(certificate.serialHex(), 16);
+            issuer = new X500Principal(certificate.issuerDn());
+        } catch (IllegalArgumentException e) {
+            return;
+        }
+        Optional<RegistryEntry> holder = entries.stream()
+                .filter(e -> issuedCertificateMatches(e, serial, issuer))
+                .findFirst();
+        if (holder.isPresent()) {
+            throw new CertificateAlreadyRegisteredException(verificationId, holder.get().getVerificationId());
+        }
+    }
+
+    /**
+     * Which entry {@link #findByIssuedCertificate} returns when more than
+     * one stores the certificate: an entry that a key-lifecycle event has
+     * moved to {@code SUPERSEDED}, {@code REVOKED} or {@code DECOMMISSIONED}
+     * before any other, then the most recent ({@link #recency()}).
+     *
+     * <p>{@link #confirm} no longer stores a certificate twice, so several
+     * holders exist only in a journal written by 1.7.0 or earlier. There a
+     * later re-confirmation must not outrank the revocation of the same
+     * certificate, which is what ordering by recency alone did.</p>
+     */
+    static Comparator<RegistryEntry> certificatePrecedence() {
+        return Comparator.comparing((RegistryEntry e) -> isLifecycleStatus(e.getStatus()))
+                .thenComparing(recency());
+    }
+
     static Comparator<RegistryEntry> recency() {
         return Comparator
                 .comparing((RegistryEntry e) -> parseInstant(e.getVerificationTimestamp()),
@@ -518,7 +591,10 @@ public interface ApprovalRegistry {
          * The verification request as submitted: public key, attestation data,
          * signature and chain, parties. Not secret and kept for the retention
          * period, so the verification can be repeated, for instance with a
-         * corrected verifier. {@code null} for entries written before 1.6.0.
+         * corrected verifier. {@code null} for entries written before 1.6.0
+         * and, since 1.8.0, for a verification that did not approve the key:
+         * of a refused request the audit log keeps the digest, and nothing
+         * else of it is stored.
          */
         private eu.gillstrom.gatekeeper.model.VerificationRequest submission;
         private String hsmVendor;

@@ -56,6 +56,12 @@ public final class TestTsa implements TsaClient {
     private final TimeStampResponseGenerator responder;
     /** When set, every request fails with an IOException (a TSA outage). */
     public final AtomicBoolean down = new AtomicBoolean();
+    /**
+     * Added to this TSA's clock: a token's {@code genTime} is the system time
+     * plus this many milliseconds. Keep it inside the TSA certificate's
+     * validity (from one minute before to one hour after construction).
+     */
+    public final AtomicLong clockOffsetMillis = new AtomicLong();
     public final AtomicLong requests = new AtomicLong();
 
     public TestTsa() throws Exception {
@@ -105,7 +111,7 @@ public final class TestTsa implements TsaClient {
         requests.incrementAndGet();
         TimeStampRequest request = new TimeStampRequest(requestDer);
         TimeStampResponse response = responder.generate(request, BigInteger.valueOf(SERIAL.getAndIncrement()),
-                new Date());
+                new Date(System.currentTimeMillis() + clockOffsetMillis.get()));
         return response.getEncoded();
     }
 

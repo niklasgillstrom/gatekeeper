@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 import eu.gillstrom.gatekeeper.model.HsmVendor;
 
 import java.io.ByteArrayInputStream;
+import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.cert.CertPathValidator;
 import java.security.cert.CertificateFactory;
@@ -50,6 +51,19 @@ import java.util.Set;
  * {@code fortanixKeyNeverExportable} ({@code .2.4.1.2}: "never exported from
  * Fortanix DSM and may not be exported in the future. This prohibition also
  * includes export in encrypted form").</li>
+ * <li>The authority certificate must state, in
+ * {@code fortanixClusterNodeEnrollmentPolicy} ({@code 1.3.6.1.4.1.49690.2.5}),
+ * the minimum protection profile {@code fortanixFX2200}
+ * ({@code .2.5.1} with qualifier {@code .2.5.1.1}) for the nodes of the
+ * cluster that holds the key. Fortanix defines that profile as an FX2200
+ * appliance with an Intel SGX trusted execution environment, compliant with
+ * at least FIPS 140-2 or 140-3 hardware level 2 (section 3.3.1 of the document
+ * named below); it is the only profile defined. The two key claims above say
+ * what the cluster did with the key. This one is the only statement in the
+ * attestation about what the cluster runs on, and until 1.7.0 it was not
+ * read: a statement from a cluster without it was accepted. The other policy
+ * item, that a site operator approves each node ({@code .2.5.2}), is not
+ * required.</li>
  * </ol>
  *
  * <p>The root is the self-signed certificate in the sample statement of
@@ -131,6 +145,12 @@ public class FortanixVerifier implements HsmAttestationVerifier {
     static final String EKU_KEY_ATTESTATION_SIGNING = "1.3.6.1.4.1.49690.8.1";
     static final String KEY_GENERATED_IN_DSM = "1.3.6.1.4.1.49690.2.4.1.1";
     static final String KEY_NEVER_EXPORTABLE = "1.3.6.1.4.1.49690.2.4.1.2";
+    /** fortanixClusterNodeEnrollmentPolicy: a SEQUENCE OF { policyItem OID, qualifiers ANY OPTIONAL }. */
+    static final String CLUSTER_NODE_ENROLLMENT_POLICY = "1.3.6.1.4.1.49690.2.5";
+    /** fortanixNodeEnrollmentPolicyItemMinimumProtectionProfile; its qualifier names the profile. */
+    static final String POLICY_ITEM_MINIMUM_PROTECTION_PROFILE = "1.3.6.1.4.1.49690.2.5.1";
+    /** fortanixFX2200. */
+    static final String PROTECTION_PROFILE_FX2200 = "1.3.6.1.4.1.49690.2.5.1.1";
     /** Critical extensions a statement may carry: Key Usage. */
     static final Set<String> KNOWN_CRITICAL = Set.of("2.5.29.15");
     static final int MAX_JSON_SIZE = 64 * 1024;
@@ -238,8 +258,18 @@ public class FortanixVerifier implements HsmAttestationVerifier {
             }
             result.setChainValid(true);
 
+            String profile = minimumProtectionProfile(authority);
+            result.setMinimumProtectionProfile(profile);
+            if (!PROTECTION_PROFILE_FX2200.equals(profile)) {
+                result.addError("FORTANIX_CLUSTER_PROFILE_NOT_STATED: the Key Attestation Authority certificate "
+                        + "does not state fortanixFX2200 as the minimum protection profile of the cluster's "
+                        + "nodes (fortanixClusterNodeEnrollmentPolicy; found " + (profile == null ? "none" : profile)
+                        + ")");
+            }
+
             result.setKeyId(keyId(statement));
-            if (csrPublicKey != null && Arrays.equals(statement.getPublicKey().getEncoded(), csrPublicKey.getEncoded())) {
+            if (csrPublicKey != null
+                    && MessageDigest.isEqual(statement.getPublicKey().getEncoded(), csrPublicKey.getEncoded())) {
                 result.setPublicKeyMatch(true);
             } else {
                 result.addError("FORTANIX_PUBLIC_KEY_MISMATCH: the statement attests another key");
@@ -286,7 +316,9 @@ public class FortanixVerifier implements HsmAttestationVerifier {
             authority.checkValidity(signedAt);
             return null;
         } catch (Exception e) {
-            return e.getMessage();
+            // Never null: null is this method's "no error". An exception
+            // without a message would otherwise have read as a valid statement.
+            return String.valueOf(e);
         }
     }
 
@@ -326,8 +358,32 @@ public class FortanixVerifier implements HsmAttestationVerifier {
                     CertificateFactory.getInstance("X.509").generateCertPath(path), params);
             return null;
         } catch (Exception e) {
-            return e.getMessage();
+            // Never null, for the same reason as in statementError.
+            return String.valueOf(e);
         }
+    }
+
+    /**
+     * The qualifier of the minimum-protection-profile item in the authority
+     * certificate's cluster node enrolment policy, or {@code null} when the
+     * certificate has no such extension or the policy no such item with a
+     * qualifier. A qualifier that is not an OID is refused as malformed.
+     */
+    private static String minimumProtectionProfile(X509Certificate authority) {
+        byte[] extension = authority.getExtensionValue(CLUSTER_NODE_ENROLLMENT_POLICY);
+        if (extension == null) {
+            return null;
+        }
+        for (org.bouncycastle.asn1.ASN1Encodable entry : org.bouncycastle.asn1.ASN1Sequence.getInstance(
+                org.bouncycastle.asn1.ASN1OctetString.getInstance(extension).getOctets())) {
+            org.bouncycastle.asn1.ASN1Sequence item = org.bouncycastle.asn1.ASN1Sequence.getInstance(entry);
+            if (POLICY_ITEM_MINIMUM_PROTECTION_PROFILE.equals(
+                    org.bouncycastle.asn1.ASN1ObjectIdentifier.getInstance(item.getObjectAt(0)).getId())
+                    && item.size() > 1) {
+                return org.bouncycastle.asn1.ASN1ObjectIdentifier.getInstance(item.getObjectAt(1)).getId();
+            }
+        }
+        return null;
     }
 
     private static String keyId(X509Certificate statement) {
@@ -364,7 +420,21 @@ public class FortanixVerifier implements HsmAttestationVerifier {
         private boolean exportable = true;
         private String keyOrigin = "unverified";
         private String keyId;
+        private String minimumProtectionProfile;
         private List<String> errors = new ArrayList<>();
+
+        /**
+         * OID of the minimum protection profile the authority certificate
+         * states for the cluster's nodes, set once the chain has validated;
+         * {@code null} when it states none.
+         */
+        public String getMinimumProtectionProfile() {
+            return minimumProtectionProfile;
+        }
+
+        public void setMinimumProtectionProfile(String minimumProtectionProfile) {
+            this.minimumProtectionProfile = minimumProtectionProfile;
+        }
 
         public void addError(String error) {
             errors.add(error);

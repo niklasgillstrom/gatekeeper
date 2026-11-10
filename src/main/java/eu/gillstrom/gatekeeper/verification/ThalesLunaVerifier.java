@@ -205,7 +205,8 @@ public class ThalesLunaVerifier implements HsmAttestationVerifier {
 
             X509Certificate leaf = certs.get(0);
             result.setHsmSerial(hsmSerial(leaf));
-            if (csrPublicKey != null && Arrays.equals(leaf.getPublicKey().getEncoded(), csrPublicKey.getEncoded())) {
+            if (csrPublicKey != null
+                    && MessageDigest.isEqual(leaf.getPublicKey().getEncoded(), csrPublicKey.getEncoded())) {
                 result.setPublicKeyMatch(true);
             } else {
                 result.addError("LUNA_PUBLIC_KEY_MISMATCH: the Proof of Origin certificate is for another key");

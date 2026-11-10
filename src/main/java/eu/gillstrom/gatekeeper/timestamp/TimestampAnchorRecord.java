@@ -16,7 +16,8 @@ import java.util.Objects;
  *     same bytes the entry signature and the signed anchor cover
  * @param tokenBase64 the DER {@code TimeStampToken}, Base64
  * @param genTime the token's {@code genTime}, copied for convenience; the
- *     value inside the token is authoritative
+ *     value inside the token is authoritative, and the audit log's chain
+ *     check fails when the copy differs from it
  */
 public record TimestampAnchorRecord(long headSequenceNumber, String headHashHex, String tokenBase64,
                                     Instant genTime) {

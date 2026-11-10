@@ -50,14 +50,25 @@ abstract: >-
   manufacturer; the HSM and
   time-stamping paths are tested only with a test JCA provider and a local
   time-stamping service. PIT detects every mutant of the 1.7.0 code as well.
+  Version 1.8.0 makes the corrections that followed a further review of the
+  code: an issued certificate is stored on one registry entry only, so that
+  a revoked, decommissioned or superseded certificate does not settle again
+  after a second confirmation; settlement verification looks the certificate
+  up by the identifiers the verdict is signed over; an audit entry's
+  time-stamp token must be of the entry's time; both journals are written so
+  that a failed append is taken back; the submitted request is kept only for
+  a verification that approved the key; a configured issuer-CA bundle that
+  is not there stops start-up; and an attestation the vendor verification
+  refused carries no article bit. PIT detects every mutant of the 1.8.0 code
+  as well.
   Its audit log is one of the four data sources of the data-minimised
   quadruple-triangulation model: at settlement time only digest,
   signature, and certificate identifiers traverse the supervisor boundary
   — transaction payload content is never exposed to the supervisor. Companions: hsm (financial-entity-side HSM
   attestation verification) and railgate (central-bank settlement-rail
   enforcement).
-version: "1.7.0"
-date-released: "2026-10-31"
+version: "1.8.0"
+date-released: "2026-11-10"
 license: MIT
 repository-code: "https://github.com/niklasgillstrom/gatekeeper"
 authors:

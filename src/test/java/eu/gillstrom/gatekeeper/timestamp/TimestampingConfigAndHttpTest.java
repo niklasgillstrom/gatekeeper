@@ -116,7 +116,7 @@ class TimestampingConfigAndHttpTest {
         Path trust = tsa.writeTrustPem(tempDir.resolve("tsa-trust.pem"));
         Path audit = tempDir.resolve("audit.jsonl");
         AuditTimestamping ts = new AuditTimestamping("entry", url, "SHA-256", "", 2000, 5000, trust.toString(), 3600,
-                audit + ".tsa-anchors.jsonl");
+                audit + ".tsa-anchors.jsonl", 300);
         AppendOnlyFileAuditLog log = new AppendOnlyFileAuditLog(audit.toString(), new EphemeralReceiptSigner(2048),
                 0, null, ts);
         log.initialise();
@@ -131,8 +131,13 @@ class TimestampingConfigAndHttpTest {
     }
 
     private AuditTimestamping configured(String mode, String tsaUrl, String alg, String trust, long interval) {
+        return configured(mode, tsaUrl, alg, trust, interval, 300);
+    }
+
+    private AuditTimestamping configured(String mode, String tsaUrl, String alg, String trust, long interval,
+                                         long entryTokenToleranceSeconds) {
         return new AuditTimestamping(mode, tsaUrl, alg, "", 1000, 1000, trust, interval,
-                tempDir.resolve("a.jsonl.tsa-anchors.jsonl").toString());
+                tempDir.resolve("a.jsonl.tsa-anchors.jsonl").toString(), entryTokenToleranceSeconds);
     }
 
     @Test
@@ -168,8 +173,20 @@ class TimestampingConfigAndHttpTest {
         assertThatThrownBy(() -> configured("entry", url, "SHA-256", empty.toString(), 60))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("No certificate");
         assertThatThrownBy(() -> new AuditTimestamping("entry", url, "SHA-256", "not-an-oid", 1000, 1000, trust, 60,
-                tempDir.resolve("b").toString()))
+                tempDir.resolve("b").toString(), 300))
                 .isInstanceOf(IllegalStateException.class);
+        // The tolerance is used by the chain check in every mode, so it is checked in every mode.
+        for (String mode : new String[] {"off", "entry", "anchor"}) {
+            for (long tolerance : new long[] {0, -1}) {
+                assertThatThrownBy(() -> configured(mode, url, "SHA-256", trust, 60, tolerance))
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("entry-token-tolerance-seconds must be > 0");
+            }
+        }
+        assertThat(configured("entry", url, "SHA-256", trust, 60, 1).entryTokenTolerance())
+                .isEqualTo(java.time.Duration.ofSeconds(1));
+        assertThat(configured("off", "", "SHA-256", "", 0).entryTokenTolerance())
+                .isEqualTo(java.time.Duration.ofSeconds(AuditTimestamping.DEFAULT_ENTRY_TOKEN_TOLERANCE_SECONDS));
     }
 
     @Test

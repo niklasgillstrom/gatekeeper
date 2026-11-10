@@ -147,8 +147,9 @@ public class GatekeeperController {
         TimestampAnchorRecord latestTimestamp = anchorService == null ? null : anchorService.latest().orElse(null);
         Optional<AuditEntry> headOpt = auditLog.head();
         if (headOpt.isEmpty()) {
-            // Empty-log anchor: still signed so a supervisor can prove the
-            // gatekeeper observed an empty trail at this moment.
+            // Empty-log anchor: the sentinel, signed. The signed bytes are a
+            // constant, so the signature shows that this key answers for an
+            // empty trail and not at which moment the trail was empty.
             String emptyHashHex = AuditEntry.SENTINEL_PREV_HASH_HEX;
             byte[] sig = signer.sign(emptyHashHex.getBytes(StandardCharsets.UTF_8));
             AuditAnchor anchor = new AuditAnchor(

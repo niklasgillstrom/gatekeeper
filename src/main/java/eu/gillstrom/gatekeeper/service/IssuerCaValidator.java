@@ -38,9 +38,15 @@ import java.util.Set;
  *
  * <p>Trust anchors are loaded from:</p>
  * <ol>
- *   <li>A PEM bundle configured via
- *       {@code gatekeeper.confirmation.issuer-ca-bundle-path} (file path), OR</li>
- *   <li>A fallback classpath resource {@code classpath:issuer-ca-bundle.pem}
+ *   <li>the PEM bundle named by
+ *       {@code gatekeeper.confirmation.issuer-ca-bundle-path}, when the
+ *       property is set. The file must then exist, be readable and hold at
+ *       least one certificate, or the gatekeeper does not start. Until 1.7.0
+ *       a path that named no file, or a file without a certificate, fell
+ *       back to the bundle below with a WARN: an operator who had configured
+ *       the supervisor's own issuers was running on the demonstration
+ *       chain;</li>
+ *   <li>otherwise, the classpath resource {@code classpath:issuer-ca-bundle.pem}
  *       that the reference implementation ships with the Getswish CA chain
  *       for demonstration.</li>
  * </ol>
@@ -50,10 +56,10 @@ import java.util.Set;
  * builder but a path must still end at one of the anchors. Every other
  * bundle certificate is a trust anchor.</p>
  *
- * <p>If neither source yields any usable certificates, the validator loads
- * with an empty anchor set and {@link #validateChain(List)} returns
- * {@code false} for every input. A startup WARN log makes the mis-
- * configuration loud.</p>
+ * <p>If no path is configured and the classpath resource yields no usable
+ * certificate, the validator loads with an empty anchor set and
+ * {@link #validateChain(List)} returns {@code false} for every input. A
+ * startup WARN log makes the mis-configuration loud.</p>
  */
 @Component
 public class IssuerCaValidator {
@@ -67,22 +73,15 @@ public class IssuerCaValidator {
             @Value("${gatekeeper.confirmation.issuer-ca-bundle-path:}") String bundlePath) {
         Set<TrustAnchor> anchors = new HashSet<>();
         List<X509Certificate> intermediates = new ArrayList<>();
+        boolean configured = bundlePath != null && !bundlePath.isBlank();
+        List<X509Certificate> configuredBundle = configured ? configuredBundle(bundlePath) : List.of();
         try {
-            List<X509Certificate> loaded = new ArrayList<>();
-            if (bundlePath != null && !bundlePath.isBlank()) {
-                Path p = Path.of(bundlePath);
-                if (Files.exists(p)) {
-                    try (FileInputStream in = new FileInputStream(bundlePath)) {
-                        loaded.addAll(parseBundle(in));
-                    }
-                } else {
-                    log.warn("IssuerCaValidator: configured bundle path '{}' does not exist.", bundlePath);
-                }
-            }
-            if (loaded.isEmpty()) {
-                // Fallback: try classpath resource shipped with the reference
-                // implementation. This gives the gatekeeper a working default
-                // when co-deployed with the GetSwish reference issuer.
+            List<X509Certificate> loaded = new ArrayList<>(configuredBundle);
+            if (!configured) {
+                // No bundle configured: the classpath resource shipped with
+                // the reference implementation. This gives the gatekeeper a
+                // working default when co-deployed with the GetSwish
+                // reference issuer.
                 try (var is = getClass().getClassLoader().getResourceAsStream("issuer-ca-bundle.pem")) {
                     if (is != null) {
                         loaded.addAll(parseBundle(is));
@@ -110,6 +109,34 @@ public class IssuerCaValidator {
         }
         this.trustAnchors = Collections.unmodifiableSet(anchors);
         this.bundleIntermediates = List.copyOf(intermediates);
+    }
+
+    /**
+     * The certificates of the bundle the operator named.
+     *
+     * @throws IllegalStateException when the path names no readable file, or
+     *     the file holds no certificate; start-up stops
+     */
+    private static List<X509Certificate> configuredBundle(String bundlePath) {
+        Path path = Path.of(bundlePath);
+        if (!Files.isRegularFile(path)) {
+            throw new IllegalStateException("gatekeeper.confirmation.issuer-ca-bundle-path names '" + bundlePath
+                    + "', which is not a file. The gatekeeper does not fall back to the bundled "
+                    + "demonstration issuers; correct the path or unset the property.");
+        }
+        List<X509Certificate> certificates;
+        try (FileInputStream in = new FileInputStream(bundlePath)) {
+            certificates = List.copyOf(parseBundle(in));
+        } catch (Exception e) {
+            throw new IllegalStateException("gatekeeper.confirmation.issuer-ca-bundle-path '" + bundlePath
+                    + "' could not be read: " + e, e);
+        }
+        if (certificates.isEmpty()) {
+            throw new IllegalStateException("gatekeeper.confirmation.issuer-ca-bundle-path '" + bundlePath
+                    + "' holds no certificate. The gatekeeper does not fall back to the bundled "
+                    + "demonstration issuers; correct the file or unset the property.");
+        }
+        return certificates;
     }
 
     public boolean validate(X509Certificate cert) {

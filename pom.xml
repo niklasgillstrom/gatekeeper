@@ -13,7 +13,7 @@
 
     <groupId>eu.gillstrom</groupId>
     <artifactId>gatekeeper</artifactId>
-    <version>1.7.0</version>
+    <version>1.8.0</version>
     <name>DORA Attestation Gatekeeper</name>
     <description>
         NCA-operated gatekeeper API for HSM attestation verification at
@@ -306,7 +306,7 @@
         </profile>
         <profile>
             <!--
-                Mutation testing with PIT: mvn -Ppit test-compile org.pitest:pitest-maven:mutationCoverage
+                Mutation testing with PIT: mvn -Ppit clean test-compile org.pitest:pitest-maven:mutationCoverage
                 Reports are written to target/pit-reports/.
             -->
             <id>pit</id>
@@ -315,7 +315,7 @@
                     <plugin>
                         <groupId>org.pitest</groupId>
                         <artifactId>pitest-maven</artifactId>
-                        <version>1.30.1</version>
+                        <version>1.30.2</version>
                         <dependencies>
                             <dependency>
                                 <groupId>org.pitest</groupId>
@@ -331,17 +331,18 @@
                                 <param>eu.gillstrom.gatekeeper.*</param>
                             </targetTests>
                             <threads>${pit.threads}</threads>
-                            <!-- Every mutant is detected in 1.7.0 (3,208 of 3,208; see PEER_REVIEW_GUIDE.md). -->
+                            <!-- Every mutant is detected; the counts of each release are in PEER_REVIEW_GUIDE.md. -->
                             <mutationThreshold>100</mutationThreshold>
-                            <!-- PIT's default logging packages, plus FileDescriptor: removing
-                                 the fsync after an audit or journal write cannot be observed
-                                 by a test, only by a power cut. -->
+                            <!-- PIT's default logging packages. Until 1.7.0 the list also
+                                 named java.io.FileDescriptor, for the fsync after an audit or
+                                 journal write. Those writes now go through JournalAppender,
+                                 whose force(true) calls are mutated and killed by
+                                 JournalAppenderTest. -->
                             <avoidCallsTo>
                                 <avoidCallsTo>java.util.logging</avoidCallsTo>
                                 <avoidCallsTo>org.apache.log4j</avoidCallsTo>
                                 <avoidCallsTo>org.slf4j</avoidCallsTo>
                                 <avoidCallsTo>org.apache.commons.logging</avoidCallsTo>
-                                <avoidCallsTo>java.io.FileDescriptor</avoidCallsTo>
                             </avoidCallsTo>
                             <timestampedReports>false</timestampedReports>
                             <outputFormats>

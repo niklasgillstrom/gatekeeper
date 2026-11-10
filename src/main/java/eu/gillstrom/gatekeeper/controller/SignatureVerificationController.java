@@ -69,10 +69,10 @@ public class SignatureVerificationController {
                     and optionally signingCertificatePem and algorithm, and
                     returns whether the signature cryptographically verifies
                     and whether the underlying certificate corresponds to a
-                    compliant gatekeeper audit entry. Without
-                    signingCertificatePem the certificate stored at Step 7 is
-                    looked up by (certSerial, issuerDn): certSerial in hex,
-                    issuerDn compared as an X.500 name.
+                    compliant gatekeeper audit entry. The certificate stored
+                    at Step 7 is looked up by (certSerial, issuerDn): certSerial
+                    in hex, issuerDn compared as an X.500 name. A supplied
+                    signingCertificatePem must be that stored certificate.
 
                     The verifier mirrors the production signing flow exactly:
                     Signature.getInstance("SHA512withRSA").initVerify(publicKey).update(digest).verify(signature)

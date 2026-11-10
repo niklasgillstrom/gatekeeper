@@ -88,6 +88,12 @@ public class IssuanceConfirmationResponse {
         ANOMALY_UNKNOWN_VERIFICATION,
         ANOMALY_NONCE_MISMATCH,
         /**
+         * ANOMALY: the submitted certificate is already stored on another
+         * registry entry. Appears only in the {@code 409} answer and on the
+         * {@code CONFIRM} audit entry; the entry confirmed is left unchanged.
+         */
+        ANOMALY_CERTIFICATE_ALREADY_REGISTERED,
+        /**
          * Key lifecycle (since the lifecycle endpoint): the issued
          * certificate was rotated out by a {@code ROTATED} event. Reached only
          * from {@link #VERIFIED_AND_ISSUED}. A confirmation never produces it.

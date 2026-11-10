@@ -25,6 +25,11 @@ import java.util.List;
  *       with more than one organisation number.</li>
  * </ul>
  *
+ * <p>{@code zeroDiscrepancies} is {@code true} when {@code discrepancyCount}
+ * is 0 and the inquiry holds an operator report and at least one bank report
+ * ({@code inputDigests}): with a side missing nothing has been compared, and
+ * the field is {@code false} whatever the count.</p>
+ *
  * <p>{@code reportSignatureBase64} is the gatekeeper's signature over the
  * canonical form of every field except itself, {@code signatureAlgorithm}
  * and {@code auditEntryHashHex}. {@code auditEntryHashHex} names the

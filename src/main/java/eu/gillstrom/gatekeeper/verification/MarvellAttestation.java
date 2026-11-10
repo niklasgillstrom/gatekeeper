@@ -470,7 +470,7 @@ public final class MarvellAttestation {
     }
 
     private static String digestOf(X509Certificate cert) {
-        String alg = cert.getSigAlgName().toUpperCase();
+        String alg = cert.getSigAlgName().toUpperCase(java.util.Locale.ROOT);
         if (alg.startsWith("SHA384")) {
             return "SHA384withRSA";
         }

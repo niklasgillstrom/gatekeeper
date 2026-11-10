@@ -238,6 +238,15 @@ class FortanixVerifierTest {
             b.addExtension(Extension.certificatePolicies, false, new CertificatePolicies(
                     new PolicyInformation(new ASN1ObjectIdentifier(FortanixVerifier.POLICY_KEY_ATTESTATION_PKI))));
         }
+        if (!isCa) {
+            // As Fortanix issues an authority certificate: FX2200 nodes, enrolled with site-operator approval.
+            b.addExtension(new ASN1ObjectIdentifier(FortanixVerifier.CLUSTER_NODE_ENROLLMENT_POLICY), false,
+                    new DERSequence(new org.bouncycastle.asn1.ASN1Encodable[] {
+                    new DERSequence(new org.bouncycastle.asn1.ASN1Encodable[] {
+                            new ASN1ObjectIdentifier(FortanixVerifier.POLICY_ITEM_MINIMUM_PROTECTION_PROFILE),
+                            new ASN1ObjectIdentifier(FortanixVerifier.PROTECTION_PROFILE_FX2200)}),
+                    new DERSequence(new ASN1ObjectIdentifier("1.3.6.1.4.1.49690.2.5.2"))}));
+        }
         return new JcaX509CertificateConverter().getCertificate(
                 b.build(new JcaContentSignerBuilder("SHA256withRSA").build(issuerKey)));
     }

@@ -17,10 +17,10 @@ import eu.gillstrom.gatekeeper.timestamp.AuditTimestamping;
 import eu.gillstrom.gatekeeper.timestamp.TimestampAnchorRecord;
 import eu.gillstrom.gatekeeper.timestamp.TimestampAnchorStore;
 import eu.gillstrom.gatekeeper.timestamp.TimestampTokenVerifier;
+import eu.gillstrom.gatekeeper.util.JournalAppender;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -42,6 +42,7 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -52,11 +53,13 @@ import java.util.concurrent.locks.ReentrantLock;
  * Default {@link AuditLog} implementation backed by a JSON-Lines file.
  *
  * <p>Storage layout: one entry per line, UTF-8 JSON, terminated with
- * {@code \n}. Each append is fsynced via {@link RandomAccessFile#getFD()}
- * + {@code FileDescriptor.sync()} before {@code append()} returns so
+ * {@code \n}. Each append is forced to the device
+ * ({@code FileChannel.force(true)}) before {@code append()} returns so
  * that crash persistence is guaranteed and the chain cannot acquire
  * gaps between entries that returned successfully and entries actually
- * on disk.</p>
+ * on disk. An append that fails leaves no part of its line in the file,
+ * and what a stopped process left after the last newline is removed by
+ * the next append ({@link JournalAppender}).</p>
  *
  * <p>Permissions: when the file is created the implementation attempts
  * to set the POSIX permissions to {@code 0640} so that arbitrary
@@ -99,7 +102,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * persisted; a TSA failure writes the entry without one (see
  * {@link AuditTimestamping}). When trusted TSA certificates are configured,
  * {@link #verifyChainIntegrity()} validates every entry token and every
- * record in the anchor file.</p>
+ * record in the anchor file, and requires an entry token to have been issued
+ * at the entry's own time (see {@link AuditTimestamping}).</p>
  *
  * <p>Legal basis: see {@link AuditLog} javadoc.</p>
  */
@@ -112,6 +116,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
     public static final long DEFAULT_INTEGRITY_CHECK_INTERVAL_SECONDS = 300L;
 
     private final Path filePath;
+    private final JournalAppender journal;
     private final ReceiptSigner signer;
     private final GatekeeperKeyDirectory keyDirectory;
     private final ObjectMapper json;
@@ -190,6 +195,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
             GatekeeperKeyDirectory keyDirectory,
             AuditTimestamping timestamping) {
         this.filePath = Paths.get(configuredPath);
+        this.journal = new JournalAppender(filePath);
         this.signer = signer;
         this.keyDirectory = keyDirectory;
         this.timestamping = timestamping == null ? AuditTimestamping.off() : timestamping;
@@ -275,6 +281,12 @@ public class AppendOnlyFileAuditLog implements AuditLog {
 
         if (truncatedTrailer) {
             rewriteTruncated();
+        } else if (journal.terminateLastLine()) {
+            // The last line is an entry, read and loaded above, without a
+            // newline after it. The next append removes whatever follows the
+            // last newline (JournalAppender), so it gets its newline now.
+            log.warn("AppendOnlyFileAuditLog: the last entry of {} was not followed by a newline; one was added",
+                    filePath.toAbsolutePath());
         }
 
         // Run a full chain-integrity check after loading so any tampering
@@ -367,9 +379,10 @@ public class AppendOnlyFileAuditLog implements AuditLog {
 
             // Entry mode: a token over the signature input, outside the hash.
             // A TSA failure returns empty and the entry is written without one
-            // — supervision is never blocked on the TSA.
+            // — supervision is never blocked on the TSA. A token that is not
+            // of this entry's time is not stored either.
             String tokenB64 = timestamping.mode() == AuditTimestamping.Mode.ENTRY
-                    ? timestamping.timestampHashHex(thisHash).map(AuditTimestamping.Token::tokenBase64).orElse(null)
+                    ? timestamping.timestampEntry(thisHash, now).map(AuditTimestamping.Token::tokenBase64).orElse(null)
                     : null;
 
             AuditEntry entry = new AuditEntry(
@@ -446,20 +459,15 @@ public class AppendOnlyFileAuditLog implements AuditLog {
     private void persist(AuditEntry entry) {
         String line;
         try {
-            line = json.writeValueAsString(entry) + "\n";
+            line = json.writeValueAsString(entry);
         } catch (Exception jsonEx) {
             throw new AuditLogException("Failed to serialise audit entry to JSON", jsonEx);
         }
-        // We open the file via RandomAccessFile so we can fsync via the
-        // FileDescriptor — Files.write() does not expose an fsync hook on
-        // every JDK and on every filesystem.
-        try (RandomAccessFile raf = new RandomAccessFile(filePath.toFile(), "rwd")) {
-            raf.seek(raf.length());
-            raf.write(line.getBytes(StandardCharsets.UTF_8));
-            // "rwd" mode already syncs writes to the underlying device;
-            // explicitly call getFD().sync() as a belt-and-braces measure
-            // for filesystems that interpret "rwd" loosely.
-            raf.getFD().sync();
+        // The entry and its newline are forced to the device before this
+        // returns; an append that fails leaves no part of the line behind
+        // (JournalAppender).
+        try {
+            journal.appendLine(line);
         } catch (IOException ioe) {
             throw new AuditLogException("Failed to persist audit entry seq=" + entry.sequenceNumber()
                     + " to " + filePath.toAbsolutePath(), ioe);
@@ -706,9 +714,9 @@ public class AppendOnlyFileAuditLog implements AuditLog {
      * per-key link. Across entries: once a v2 entry has been seen, no v1
      * entry may follow, and a v1 entry may not carry any field that only v2
      * hashes (it would be unauthenticated). When a token validator is
-     * configured, every entry token and every anchor record is validated, and
-     * every anchor must name an entry of this chain by sequence number and
-     * hash.</p>
+     * configured, every entry token and every anchor record is validated, an
+     * entry token must be of the entry's time, and every anchor must name an
+     * entry of this chain by sequence number and hash.</p>
      *
      * @param anchors anchor records to check; empty when anchors are not checked, which is
      *     always so without a token validator
@@ -782,8 +790,7 @@ public class AppendOnlyFileAuditLog implements AuditLog {
             if (e.timestampTokenBase64() != null) {
                 if (tokenVerifier == null) {
                     unvalidatedTokens++;
-                } else if (!verifyToken(tokenVerifier, e.timestampTokenBase64(), e.thisEntryHashHex(),
-                        "entry sequenceNumber " + e.sequenceNumber())) {
+                } else if (!verifyEntryToken(tokenVerifier, e)) {
                     return false;
                 }
             }
@@ -808,29 +815,65 @@ public class AppendOnlyFileAuditLog implements AuditLog {
                         + "match that entry's hash", seq);
                 return false;
             }
-            if (!verifyToken(tokenVerifier, a.tokenBase64(), a.headHashHex(),
-                    "anchor of sequenceNumber " + seq)) {
+            TimestampTokenVerifier.Verification token = verifiedToken(tokenVerifier, a.tokenBase64(),
+                    a.headHashHex(), "anchor of sequenceNumber " + seq);
+            if (token == null) {
+                return false;
+            }
+            // The record's genTime is a copy of the token's, and it is the
+            // copy that /anchor, /anchor/timestamps and /health report. Until
+            // 1.7.0 the two were never compared, so the copy could be edited
+            // in the anchor file without the chain check noticing.
+            if (!Objects.equals(a.genTime(), token.genTime())) {
+                log.warn("AuditLog chain check failed: timestamp anchor for sequenceNumber {} states genTime {} "
+                        + "but its token was issued at {}", seq, a.genTime(), token.genTime());
                 return false;
             }
         }
         return true;
     }
 
-    private static boolean verifyToken(TimestampTokenVerifier verifier, String tokenBase64, String hashHex,
-                                       String what) {
+    /**
+     * An entry's token: valid for the entry's hash, and issued at the entry's
+     * own time. Without the second condition the holder of the signing key
+     * could write the chain again and have every entry time-stamped anew —
+     * the new tokens are valid for the new hashes, and only their
+     * {@code genTime} shows that they were not obtained when the entries say
+     * they were written.
+     */
+    private boolean verifyEntryToken(TimestampTokenVerifier verifier, AuditEntry e) {
+        TimestampTokenVerifier.Verification v = verifiedToken(verifier, e.timestampTokenBase64(),
+                e.thisEntryHashHex(), "entry sequenceNumber " + e.sequenceNumber());
+        if (v == null) {
+            return false;
+        }
+        if (!timestamping.isEntryTime(e.timestamp(), v.genTime())) {
+            log.warn("AuditLog chain check failed: timestamp token of entry sequenceNumber {} was issued at {}, "
+                            + "more than {}s from the entry's timestamp {} — the entry was time-stamped again, "
+                            + "or its timestamp is not the time it was written",
+                    e.sequenceNumber(), v.genTime(), timestamping.entryTokenTolerance().toSeconds(), e.timestamp());
+            return false;
+        }
+        return true;
+    }
+
+    /** The verification of a token that is valid for {@code hashHex}; {@code null}, after a WARN, otherwise. */
+    private static TimestampTokenVerifier.Verification verifiedToken(TimestampTokenVerifier verifier,
+                                                                     String tokenBase64, String hashHex,
+                                                                     String what) {
         byte[] token;
         try {
             token = Base64.getDecoder().decode(tokenBase64);
         } catch (IllegalArgumentException ex) {
             log.warn("AuditLog chain check failed: timestamp token of {} is not valid Base64", what);
-            return false;
+            return null;
         }
         TimestampTokenVerifier.Verification v = verifier.verify(token, hashHex.getBytes(StandardCharsets.UTF_8));
         if (!v.valid()) {
             log.warn("AuditLog chain check failed: timestamp token of {} did not validate: {}", what, v.error());
-            return false;
+            return null;
         }
-        return true;
+        return v;
     }
 
     /**

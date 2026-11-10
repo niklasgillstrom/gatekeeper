@@ -24,7 +24,11 @@ import java.time.Instant;
  *       bytes (its {@code thisEntryHashHex}).</li>
  *   <li>{@code headTimestamp} — timestamp recorded on the head entry.</li>
  *   <li>{@code headSignatureBase64} — gatekeeper's signature over the
- *       UTF-8 bytes of {@code headHashHex}.</li>
+ *       UTF-8 bytes of {@code headHashHex}, and over nothing else in this
+ *       record. {@code headSequenceNumber} and {@code headTimestamp} are
+ *       covered by that hash, so whoever holds the head entry can check
+ *       them; {@code totalEntries} is not signed, and the anchor carries no
+ *       time of its own.</li>
  *   <li>{@code signingKeyFingerprintHex} — fingerprint of the gatekeeper
  *       key that produced {@code headSignatureBase64}; allows a relying
  *       party to look up the certificate via

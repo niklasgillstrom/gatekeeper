@@ -12,6 +12,7 @@ import java.security.cert.X509Certificate;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Unit tests for {@link IssuerCaValidator}. The validator accepts an empty
@@ -43,19 +44,60 @@ class IssuerCaValidatorTest {
         assertThat(validator.validate(selfSigned)).isFalse();
     }
 
+    /**
+     * A bundle the operator named is the bundle, or there is none. Until
+     * 1.7.0 a path that named no file fell back to the demonstration chain on
+     * the class path with a WARN, so the gatekeeper started on issuers the
+     * operator had not chosen.
+     */
     @Test
-    void badBundlePathYieldsEmptyAnchorsAndValidateReturnsFalse(@TempDir Path tmp) throws Exception {
-        // Point at a file that does not exist AND ensure the classpath
-        // fallback is consulted. The fallback may still populate anchors
-        // (reference bundle ships on classpath), so we assert behaviourally
-        // against a throwaway cert rather than insisting on an empty set.
+    void aConfiguredBundleThatIsNotAFileStopsStartUp(@TempDir Path tmp) {
         Path missing = tmp.resolve("does-not-exist.pem");
-        IssuerCaValidator validator = new IssuerCaValidator(missing.toAbsolutePath().toString());
+        for (Path notAFile : new Path[] {missing, tmp}) {
+            assertThatThrownBy(() -> new IssuerCaValidator(notAFile.toString()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("gatekeeper.confirmation.issuer-ca-bundle-path names '" + notAFile
+                            + "', which is not a file. The gatekeeper does not fall back to the bundled "
+                            + "demonstration issuers; correct the path or unset the property.");
+        }
+    }
 
-        KeyPair kp = TestPki.newRsaKeyPair(2048);
-        X509Certificate selfSigned = TestPki.selfSignedCa(kp, "FAKE-BAD-PATH");
+    @Test
+    void aConfiguredBundleWithoutACertificateStopsStartUp(@TempDir Path tmp) throws Exception {
+        for (String content : new String[] {"", "\n\n", "not a certificate",
+                "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"}) {
+            Path bundle = tmp.resolve("empty.pem");
+            Files.writeString(bundle, content);
 
-        assertThat(validator.validate(selfSigned)).isFalse();
+            assertThatThrownBy(() -> new IssuerCaValidator(bundle.toString()))
+                    .as("content: %s", content)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("gatekeeper.confirmation.issuer-ca-bundle-path '" + bundle
+                            + "' holds no certificate. The gatekeeper does not fall back to the bundled "
+                            + "demonstration issuers; correct the file or unset the property.");
+        }
+    }
+
+    @Test
+    void aConfiguredBundleReplacesTheShippedOne(@TempDir Path tmp) throws Exception {
+        KeyPair rootKey = TestPki.newRsaKeyPair(2048);
+        X509Certificate root = TestPki.selfSignedCa(rootKey, "Operator Root");
+        Path bundle = tmp.resolve("operator.pem");
+        Files.writeString(bundle, TestPki.toPem(root));
+
+        IssuerCaValidator validator = new IssuerCaValidator(bundle.toString());
+
+        assertThat(validator.trustAnchorCount()).as("the operator's root, and not the shipped one beside it")
+                .isEqualTo(1);
+        assertThat(validator.validate(TestPki.endEntity(TestPki.newRsaKeyPair(2048), "Leaf", root,
+                rootKey.getPrivate()))).isTrue();
+    }
+
+    @Test
+    void withoutAConfiguredPathTheShippedBundleIsUsed() {
+        for (String unset : new String[] {null, "", "  "}) {
+            assertThat(new IssuerCaValidator(unset).trustAnchorCount()).as("path: '%s'", unset).isEqualTo(1);
+        }
     }
 
     @Test

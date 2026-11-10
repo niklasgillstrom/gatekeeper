@@ -1,4 +1,4 @@
-# gatekeeper/e2e — local end-to-end test of hsm, gatekeeper and railgate 1.7.0
+# gatekeeper/e2e — local end-to-end test of hsm, gatekeeper and railgate 1.8.0
 
 A local test only. It starts the three already-built service jars as child processes on free loopback ports, drives the real HTTP flow between them, and stops them afterwards. It deploys nothing and calls nothing outside `127.0.0.1`.
 
@@ -9,16 +9,16 @@ It lives in the gatekeeper repository because the supervisor that operates gatek
 Clone the three repositories side by side, at the same release:
 
 ```
-git clone --branch v1.7.0 https://github.com/niklasgillstrom/gatekeeper.git
-git clone --branch v1.7.0 https://github.com/niklasgillstrom/hsm.git
-git clone --branch v1.7.0 https://github.com/niklasgillstrom/railgate.git
+git clone --branch v1.8.0 https://github.com/niklasgillstrom/gatekeeper.git
+git clone --branch v1.8.0 https://github.com/niklasgillstrom/hsm.git
+git clone --branch v1.8.0 https://github.com/niklasgillstrom/railgate.git
 (cd gatekeeper && mvn verify)
 (cd hsm && mvn verify)
 (cd railgate && mvn verify)
 cd gatekeeper/e2e && ./run.sh
 ```
 
-hsm and railgate are looked up next to the gatekeeper checkout; `-De2e.reposDir=<dir>` points elsewhere. `run.sh` checks that the three `target/*-1.7.0.jar` exist, stops processes left over from an interrupted run, and runs `mvn -B verify` here. Requires Java 21 or later (`java` and `keytool`; `-De2e.javaHome=<JDK>` selects another JDK for the three services) and Maven. Logs from the three services are written to `target/e2e-logs/`, working files to `target/e2e-work/`.
+hsm and railgate are looked up next to the gatekeeper checkout; `-De2e.reposDir=<dir>` points elsewhere. `run.sh` checks that the three `target/*-1.8.0.jar` exist, stops processes left over from an interrupted run, and runs `mvn -B verify` here. Requires Java 21 or later (`java` and `keytool`; `-De2e.javaHome=<JDK>` selects another JDK for the three services) and Maven. Logs from the three services are written to `target/e2e-logs/`, working files to `target/e2e-work/`.
 
 ## What is exercised, and how
 
@@ -59,6 +59,10 @@ Local-only configuration used: gatekeeper with mTLS off, the ephemeral receipt s
   The signature must be RSA PKCS#1 v1.5 with SHA-512 over the digest bytes (`SHA512withRSA`), which is how Swish Utbetalning payouts are signed. Test 8 checks the pair locally first and says so if it was made by another key. The same pair is what test 14 needs: gatekeeper checks the signature before the registry status, so a revoked certificate answers `CERT_REVOKED` only to a signature that verifies.
 
 Tests that cannot run for these reasons are reported as skipped (aborted assumptions), not as passed.
+
+## Result at 1.8.0
+
+Run against the three 1.8.0 jars (`./run.sh`, 2026-11-10): 17 test runs, 0 failures, 7 skipped — the runs that need material which was not supplied, as at 1.7.0.
 
 ## Result at 1.7.0
 

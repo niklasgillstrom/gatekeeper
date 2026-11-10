@@ -266,7 +266,8 @@ public class NShieldVerifier implements HsmAttestationVerifier {
             }
 
             // CSRL1
-            if (csrPublicKey != null && Arrays.equals(attested.publicKey().getEncoded(), csrPublicKey.getEncoded())) {
+            if (csrPublicKey != null
+                    && MessageDigest.isEqual(attested.publicKey().getEncoded(), csrPublicKey.getEncoded())) {
                 result.setPublicKeyMatch(true);
             } else {
                 result.addError("NSHIELD_PUBLIC_KEY_MISMATCH: the bundle attests another key");

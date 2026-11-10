@@ -186,7 +186,7 @@ public class VerificationService {
         // Determine vendor
         HsmVendor vendor;
         try {
-            vendor = HsmVendor.valueOf(request.getHsmVendor().toUpperCase());
+            vendor = HsmVendor.valueOf(request.getHsmVendor().toUpperCase(java.util.Locale.ROOT));
         } catch (Exception e) {
             errors.add("Unsupported or invalid HSM vendor: " + request.getHsmVendor()
                     + ". Supported: YUBICO, SECUROSYS, AZURE, GOOGLE, MARVELL, THALES, CRYPTO4A, FORTANIX, ENTRUST");
@@ -207,6 +207,11 @@ public class VerificationService {
         String hsmFirmwareVersion = null;
         Integer hsmFipsIndicator = null;
         Boolean hsmFipsApprovedMode = null;
+
+        // Everything the switch below adds to errors is an objection to the
+        // attestation itself, as distinct from the key policy before it and
+        // the FIPS-mode policy after it.
+        int errorsBeforeAttestation = errors.size();
 
         switch (vendor) {
             case SECUROSYS -> {
@@ -398,6 +403,8 @@ public class VerificationService {
             }
         }
 
+        List<String> attestationErrors = List.copyOf(errors.subList(errorsBeforeAttestation, errors.size()));
+
         // FIPS-approved mode, when the key policy requires the attestation to
         // state it (gatekeeper.key-policy.require-fips-approved-mode). Like a
         // key outside the policy, a violation is NON-COMPLIANT whatever else
@@ -414,7 +421,7 @@ public class VerificationService {
         // Build DORA compliance mapping
         DoraCompliance doraCompliance = buildDoraCompliance(
                 compliant, publicKeyMatch, attestationChainValid, attestationSignatureValid,
-                generatedOnDevice, exportable, keyViolation, fipsViolation);
+                generatedOnDevice, exportable, keyViolation, fipsViolation, attestationErrors);
 
         // Key properties
         KeyProperties keyProperties = KeyProperties.builder()
@@ -444,9 +451,14 @@ public class VerificationService {
 
         // Register in approval registry (Step 4). The calling principal is
         // bound to the entry so that only the same client can confirm it.
+        // The evidence is kept only for a verification that approved the key.
+        // Until 1.7.0 it was kept for every request: one that passed bean
+        // validation and was not even a key left its 262 144 characters in
+        // memory and 467 kB in the journal, at the rate limit of every
+        // client. A refusal keeps the audit entry's digest of the request.
         approvalRegistry.register(
                 verificationId, confirmationNonce, compliant, publicKeyFingerprint,
-                parties(request), request,
+                parties(request), compliant ? request : null,
                 compliant ? vendor.getVendorName() : null,
                 compliant ? hsmModel : null,
                 request.getCountryCode(),
@@ -536,31 +548,45 @@ public class VerificationService {
                 .build();
     }
 
+    /**
+     * @param attestationErrors what the vendor verification objected to. The
+     *     five flags before it do not cover every objection: a Marvell
+     *     attestation whose signature, chain, key, origin and extractability
+     *     all check out is still refused while the format is unconfirmed
+     *     ({@code MARVELL_FORMAT_UNCONFIRMED}), and so is a Fortanix one whose
+     *     cluster states no protection profile. Until 1.7.0 such a receipt was
+     *     {@code compliant=false} with five article bits {@code true} and the
+     *     summary "Non-compliant: ." An article bit now also requires that
+     *     the verification objected to nothing.
+     */
     private DoraCompliance buildDoraCompliance(boolean compliant, boolean publicKeyMatch,
             boolean chainValid, boolean signatureValid, boolean generatedOnDevice, boolean exportable,
-            String keyViolation, String fipsViolation) {
+            String keyViolation, String fipsViolation, List<String> attestationErrors) {
+
+        // The attestation verified: signature and chain, and nothing objected to.
+        boolean attested = signatureValid && chainValid && attestationErrors.isEmpty();
 
         // Article 5(2)(b): High standards for authenticity and integrity
         // Cannot be maintained without verified HSM protection
-        boolean art5_2b = signatureValid && chainValid && publicKeyMatch && !exportable;
+        boolean art5_2b = attested && publicKeyMatch && !exportable;
 
         // Article 6(10): Full responsibility for verification of compliance
         // "The verification" in definite form presupposes verification occurs
-        boolean art6_10 = signatureValid && chainValid && publicKeyMatch && generatedOnDevice && !exportable;
+        boolean art6_10 = attested && publicKeyMatch && generatedOnDevice && !exportable;
 
         // Article 9(3)(c): PREVENT impairment of authenticity and integrity
         // Verb is "prevent" — requires active measure, not passive contractual term
-        boolean art9_3c = signatureValid && chainValid && publicKeyMatch && !exportable;
+        boolean art9_3c = attested && publicKeyMatch && !exportable;
 
         // Article 9(3)(d): "ensure that data is protected from risks arising from
         // data management, including poor administration, processing-related
         // risks and human error"
-        boolean art9_3d = signatureValid && chainValid && generatedOnDevice && !exportable;
+        boolean art9_3d = attested && generatedOnDevice && !exportable;
 
         // Article 9(4)(d): "policies and protocols for strong authentication
         // mechanisms, based on relevant standards and dedicated control systems,
         // and protection measures of cryptographic keys"
-        boolean art9_4d = signatureValid && chainValid && publicKeyMatch && generatedOnDevice && !exportable;
+        boolean art9_4d = attested && publicKeyMatch && generatedOnDevice && !exportable;
 
         // Article 28(1)(a): Full responsibility at all times regardless of
         // contractual arrangements
@@ -571,13 +597,13 @@ public class VerificationService {
             summary = "Signing key is cryptographically proven to be generated and stored in a certified HSM "
                     + "with non-exportable attribute. All DORA requirements for cryptographic key management "
                     + "are independently verifiable.";
-        } else if (keyViolation != null && fipsViolation == null && signatureValid && chainValid && publicKeyMatch
+        } else if (keyViolation != null && fipsViolation == null && attested && publicKeyMatch
                 && generatedOnDevice && !exportable) {
             // The articles above describe the attestation; the key itself is
             // outside the scheme's key policy.
             summary = "Non-compliant: " + keyViolation + ". The attestation evidence verified, but the "
                     + "key is not one the scheme accepts.";
-        } else if (fipsViolation != null && signatureValid && chainValid && publicKeyMatch && generatedOnDevice
+        } else if (fipsViolation != null && attested && publicKeyMatch && generatedOnDevice
                 && !exportable) {
             // The articles above describe the attestation, which verified; the
             // scheme's policy also requires it to state FIPS-approved mode.
@@ -597,6 +623,8 @@ public class VerificationService {
                 failures.add("key not generated on device");
             if (exportable)
                 failures.add("key is exportable");
+            if (failures.isEmpty() && !attestationErrors.isEmpty())
+                failures.add("attestation not accepted (" + String.join("; ", attestationErrors) + ")");
             if (keyViolation != null)
                 failures.add(keyViolation);
             if (fipsViolation != null)
@@ -673,10 +701,11 @@ public class VerificationService {
         String verificationId = UUID.randomUUID().toString();
         String confirmationNonce = generateConfirmationNonce();
 
-        // Register non-compliant result in approval registry
+        // Register non-compliant result in approval registry, without the
+        // submitted evidence (see verifyInternal).
         approvalRegistry.register(
                 verificationId, confirmationNonce, false, null,
-                parties(request), request,
+                parties(request), (VerificationRequest) null,
                 null, null, request.getCountryCode(),
                 principalResolver.currentPrincipal());
 
@@ -1021,20 +1050,23 @@ public class VerificationService {
                     publicKeyMatch,
                     issuedCertificate);
         } catch (ApprovalRegistry.NonceMismatchException e) {
-            // Answered like every other confirmation: signed, so the financial
-            // entity can tell the gatekeeper's refusal from anyone else's.
             anomalies.add("ANOMALY: Confirmation nonce does not match the nonce bound to "
                     + "verificationId at verify time. Possible Step-7 replay attempt.");
-            IssuanceConfirmationResponse rejection = IssuanceConfirmationResponse.builder()
-                    .verificationId(confirmation.getVerificationId())
-                    .loopClosed(false)
-                    .registryStatus(IssuanceConfirmationResponse.RegistryStatus.ANOMALY_NONCE_MISMATCH)
-                    .processedTimestamp(processedTimestamp.toString())
-                    .anomalies(anomalies)
-                    .build();
-            receiptSigner.signInto(rejection);
-            appendConfirmAuditEntry(confirmation, rejection, expectedFingerprint, validatedCertificate);
-            return rejection;
+            return refusedConfirmation(confirmation,
+                    IssuanceConfirmationResponse.RegistryStatus.ANOMALY_NONCE_MISMATCH,
+                    processedTimestamp, anomalies, expectedFingerprint, validatedCertificate);
+        } catch (ApprovalRegistry.CertificateAlreadyRegisteredException e) {
+            // The certificate is already stored on an entry: the original
+            // issuance, whatever a key-lifecycle event has since made of it.
+            // Nothing was changed. The other entry is named in the log only,
+            // because it may belong to another client.
+            log.warn("Confirm refused: {}", e.getMessage());
+            anomalies.add("ANOMALY: The submitted signing certificate is already registered under "
+                    + "another verification. An issued certificate is recorded on one registry "
+                    + "entry only, and a key-lifecycle event on that entry stays in force.");
+            return refusedConfirmation(confirmation,
+                    IssuanceConfirmationResponse.RegistryStatus.ANOMALY_CERTIFICATE_ALREADY_REGISTERED,
+                    processedTimestamp, anomalies, expectedFingerprint, validatedCertificate);
         }
 
         // Determine final status
@@ -1072,6 +1104,31 @@ public class VerificationService {
         appendConfirmAuditEntry(confirmation, resp, expectedFingerprint, validatedCertificate);
 
         return resp;
+    }
+
+    /**
+     * The answer to a confirmation the registry refused without changing
+     * anything. Answered like every other confirmation: signed, so the
+     * financial entity can tell the gatekeeper's refusal from anyone else's,
+     * and written to the audit log as a {@code CONFIRM} entry.
+     */
+    private IssuanceConfirmationResponse refusedConfirmation(
+            IssuanceConfirmation confirmation,
+            IssuanceConfirmationResponse.RegistryStatus status,
+            Instant processedTimestamp,
+            List<String> anomalies,
+            String expectedFingerprint,
+            ApprovalRegistry.IssuedCertificate validatedCertificate) {
+        IssuanceConfirmationResponse rejection = IssuanceConfirmationResponse.builder()
+                .verificationId(confirmation.getVerificationId())
+                .loopClosed(false)
+                .registryStatus(status)
+                .processedTimestamp(processedTimestamp.toString())
+                .anomalies(anomalies)
+                .build();
+        receiptSigner.signInto(rejection);
+        appendConfirmAuditEntry(confirmation, rejection, expectedFingerprint, validatedCertificate);
+        return rejection;
     }
 
     /**

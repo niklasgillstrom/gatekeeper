@@ -144,6 +144,73 @@ class SettlementLookupTest {
         assertThat(r.getReason()).isEqualTo("CERT_EXPIRED");
     }
 
+    /**
+     * The signed verdict names the request's {@code certSerial} and
+     * {@code issuerDn}. Until 1.7.0 a presented certificate replaced them in
+     * the lookup, so a request rewritten in transit — the identifiers the
+     * caller asked about, with a compliant certificate and its signature put
+     * in place of the caller's — was answered {@code OK} for a certificate
+     * that had not been verified.
+     */
+    @Test
+    @DisplayName("A presented certificate settles only under its own serial and issuer")
+    void presentedCertificateIsLookedUpUnderTheRequestsIdentifiers() throws Exception {
+        KeyPair compliant = TestPki.newRsaKeyPair(2048);
+        X509Certificate compliantCert = TestPki.endEntity(compliant, "COMPLIANT", issuerCa, issuerKp.getPrivate());
+        registerAndConfirm("C", compliant, compliantCert, true);
+        KeyPair revoked = TestPki.newRsaKeyPair(2048);
+        X509Certificate revokedCert = TestPki.endEntity(revoked, "REVOKED", issuerCa, issuerKp.getPrivate());
+        registerAndConfirm("R", revoked, revokedCert, true);
+        assertThat(registry.changeStatus("R", RegistryStatus.REVOKED, "key compromise", null).isApplied()).isTrue();
+        X509Certificate neverRegistered = TestPki.endEntity(TestPki.newRsaKeyPair(2048), "NEVER-REGISTERED",
+                issuerCa, issuerKp.getPrivate());
+        String issuer = compliantCert.getIssuerX500Principal().getName();
+        String[][] named = {
+            {revokedCert.getSerialNumber().toString(16), issuer},
+            {neverRegistered.getSerialNumber().toString(16), issuer},
+            {compliantCert.getSerialNumber().toString(16), "CN=ANOTHER-ISSUER-CA"}};
+
+        for (String[] identifiers : named) {
+            SignatureVerificationRequest rewritten = signed(compliant, compliantCert, true);
+            rewritten.setCertSerial(identifiers[0]);
+            rewritten.setIssuerDn(identifiers[1]);
+
+            SignatureVerificationResponse r = service.verify(rewritten);
+
+            assertThat(r.getReason()).as(identifiers[0] + " / " + identifiers[1]).isEqualTo("CERT_NOT_FOUND");
+            assertThat(r.isSignatureValid()).isFalse();
+            assertThat(r.isCompliant()).isFalse();
+            assertThat(r.getAuditEntryId()).isNull();
+        }
+
+        SignatureVerificationResponse genuine = service.verify(signed(compliant, compliantCert, true));
+        assertThat(genuine.getReason()).isEqualTo("OK");
+        assertThat(genuine.getAuditEntryId()).isEqualTo("C");
+    }
+
+    @Test
+    @DisplayName("certSerial and issuerDn are required with a presented certificate too")
+    void identifiersAreRequiredWithAPresentedCertificate() throws Exception {
+        KeyPair kp = TestPki.newRsaKeyPair(2048);
+        X509Certificate cert = TestPki.endEntity(kp, "ISSUED", issuerCa, issuerKp.getPrivate());
+        registerAndConfirm("V", kp, cert, true);
+        String serial = cert.getSerialNumber().toString(16);
+        String issuer = cert.getIssuerX500Principal().getName();
+        String[][] unusable = {{null, issuer}, {" ", issuer}, {"not-hex", issuer},
+            {serial, null}, {serial, " "}, {serial, "not a distinguished name"}};
+
+        for (String[] identifiers : unusable) {
+            SignatureVerificationRequest request = signed(kp, cert, true);
+            request.setCertSerial(identifiers[0]);
+            request.setIssuerDn(identifiers[1]);
+
+            SignatureVerificationResponse r = service.verify(request);
+
+            assertThat(r.getReason()).as(identifiers[0] + " / " + identifiers[1]).isEqualTo("MALFORMED_INPUT");
+            assertThat(r.isCompliant()).isFalse();
+        }
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private void registerAndConfirm(String id, KeyPair kp, X509Certificate cert, boolean match)

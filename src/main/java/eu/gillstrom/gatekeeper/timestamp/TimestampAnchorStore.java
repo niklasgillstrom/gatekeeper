@@ -5,11 +5,11 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import eu.gillstrom.gatekeeper.util.JournalAppender;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,10 +26,11 @@ import java.util.Optional;
  * Append-only JSON-Lines file of {@link TimestampAnchorRecord}s, kept beside
  * the audit log.
  *
- * <p>Each append is written with {@code RandomAccessFile} in {@code rwd} mode
- * and {@code FileDescriptor.sync()} before returning, as the audit log is. The
- * file is created with POSIX permissions {@code 0640} where the filesystem
- * supports them.</p>
+ * <p>Each append is written and forced to the device before returning, as
+ * the audit log is, and through the same {@link JournalAppender}: a record
+ * that fails part-way leaves no part of its line in the file. The file is
+ * created with POSIX permissions {@code 0640} where the filesystem supports
+ * them.</p>
  *
  * <p>At start-up a trailing line that does not parse (an append cut off by a
  * crash) is removed; an unparseable line before the last one is corruption
@@ -42,11 +43,13 @@ public final class TimestampAnchorStore {
     private static final Logger log = LoggerFactory.getLogger(TimestampAnchorStore.class);
 
     private final Path path;
+    private final JournalAppender journal;
     private final ObjectMapper json;
     private final List<TimestampAnchorRecord> records = new ArrayList<>();
 
     public TimestampAnchorStore(Path path) {
         this.path = path;
+        this.journal = new JournalAppender(path);
         @SuppressWarnings("deprecation")
         ObjectMapper mapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule())
@@ -105,13 +108,18 @@ public final class TimestampAnchorStore {
             } catch (Exception atomicFail) {
                 Files.move(tmp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             }
+        } else if (journal.terminateLastLine()) {
+            // A whole last record without its newline was loaded above; the
+            // next append would otherwise remove it (JournalAppender).
+            log.warn("TimestampAnchorStore: the last record of {} was not followed by a newline; one was added",
+                    path.toAbsolutePath());
         }
         applyRestrictivePermissions(path);
     }
 
     /** Append and fsync one record, then add it to the in-memory list. */
     public synchronized void append(TimestampAnchorRecord record) throws IOException {
-        String line = json.writeValueAsString(record) + "\n";
+        String line = json.writeValueAsString(record);
         boolean created = false;
         if (!Files.exists(path)) {
             Path parent = path.getParent();
@@ -124,11 +132,7 @@ public final class TimestampAnchorStore {
         if (created) {
             applyRestrictivePermissions(path);
         }
-        try (RandomAccessFile raf = new RandomAccessFile(path.toFile(), "rwd")) {
-            raf.seek(raf.length());
-            raf.write(line.getBytes(StandardCharsets.UTF_8));
-            raf.getFD().sync();
-        }
+        journal.appendLine(line);
         records.add(record);
     }
 

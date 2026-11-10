@@ -408,6 +408,50 @@ class AppendOnlyFileAuditLogTest {
 
     @Test
     void chainSignedWithSha384WithEcdsaIsIntact() throws Exception {
+        ConfiguredReceiptSigner ecSigner = ecSigner();
+
+        Path file = tempDir.resolve("sha384-ecdsa.jsonl");
+        AppendOnlyFileAuditLog log = new AppendOnlyFileAuditLog(file.toString(), ecSigner);
+        log.initialise();
+        log.append(sampleRequest("1", true, "VERIFY"));
+        log.append(sampleRequest("2", false, "CONFIRM"));
+
+        assertThat(log.verifyChainIntegrity()).isTrue();
+        AppendOnlyFileAuditLog reloaded = new AppendOnlyFileAuditLog(file.toString(), ecSigner);
+        reloaded.initialise();
+        assertThat(reloaded.verifyChainIntegrity()).isTrue();
+    }
+
+    /**
+     * A limitation, stated in README.md ("Hash-chained append-only audit
+     * log"): every entry is verified with the algorithm configured now, and
+     * an entry does not record its own. A rotation from an RSA key to an EC
+     * key therefore leaves the entries signed before it unverifiable,
+     * although the old certificate is listed as retired and nothing has been
+     * tampered with.
+     */
+    @Test
+    void aChainSignedBeforeAChangeOfAlgorithmDoesNotVerifyAfterIt() throws Exception {
+        Path file = tempDir.resolve("rotation-other-algorithm.jsonl");
+        EphemeralReceiptSigner rsaSigner = new EphemeralReceiptSigner(2048);
+        AppendOnlyFileAuditLog beforeRotation = new AppendOnlyFileAuditLog(file.toString(), rsaSigner);
+        beforeRotation.initialise();
+        beforeRotation.append(sampleRequest("1", true, "VERIFY"));
+        assertThat(beforeRotation.verifyChainIntegrity()).isTrue();
+
+        ConfiguredReceiptSigner ecSigner = ecSigner();
+        GatekeeperKeyDirectory keyDirectory =
+                new GatekeeperKeyDirectory(ecSigner, rsaSigner.getSigningCertificatePem());
+        keyDirectory.initialise();
+        AppendOnlyFileAuditLog afterRotation =
+                new AppendOnlyFileAuditLog(file.toString(), ecSigner, 0, keyDirectory);
+        afterRotation.initialise();
+
+        assertThat(afterRotation.size()).isEqualTo(1);
+        assertThat(afterRotation.verifyChainIntegrity()).isFalse();
+    }
+
+    private ConfiguredReceiptSigner ecSigner() throws Exception {
         KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
         kpg.initialize(384);
         KeyPair kp = kpg.generateKeyPair();
@@ -425,19 +469,8 @@ class AppendOnlyFileAuditLogTest {
         try (OutputStream out = Files.newOutputStream(keystorePath)) {
             keyStore.store(out, "changeit".toCharArray());
         }
-        ConfiguredReceiptSigner ecSigner = new ConfiguredReceiptSigner(
+        return new ConfiguredReceiptSigner(
                 keystorePath.toString(), "changeit", "seal", "changeit", "SHA384withECDSA");
-
-        Path file = tempDir.resolve("sha384-ecdsa.jsonl");
-        AppendOnlyFileAuditLog log = new AppendOnlyFileAuditLog(file.toString(), ecSigner);
-        log.initialise();
-        log.append(sampleRequest("1", true, "VERIFY"));
-        log.append(sampleRequest("2", false, "CONFIRM"));
-
-        assertThat(log.verifyChainIntegrity()).isTrue();
-        AppendOnlyFileAuditLog reloaded = new AppendOnlyFileAuditLog(file.toString(), ecSigner);
-        reloaded.initialise();
-        assertThat(reloaded.verifyChainIntegrity()).isTrue();
     }
 
     @Test

@@ -23,22 +23,25 @@ import lombok.NoArgsConstructor;
  * resistance ensures the digest uniquely binds the signature to the exact
  * transaction performed.
  *
- * <p>Two paths are supported for locating the certificate's public key:
+ * <p>The certificate's public key is located in one way, with or without
+ * {@code signingCertificatePem}:
  * <ul>
- *   <li>If {@code signingCertificatePem} is supplied, it must be byte-identical
- *       to the certificate stored for {@code (certSerial, issuerDn)};
- *       otherwise the answer is {@code CERT_NOT_FOUND}. The public key is
- *       always taken from the stored certificate.</li>
- *   <li>If absent, gatekeeper looks up the certificate stored at Step-7
- *       confirmation under {@code (certSerial, issuerDn)}: {@code certSerial}
- *       is hexadecimal, case-insensitive, with an optional {@code 0x}
- *       prefix, and {@code issuerDn} is compared as an
+ *   <li>Gatekeeper looks up the certificate stored at Step-7 confirmation
+ *       under {@code (certSerial, issuerDn)}: {@code certSerial} is
+ *       hexadecimal, case-insensitive, with an optional {@code 0x} prefix,
+ *       and {@code issuerDn} is compared as an
  *       {@link javax.security.auth.x500.X500Principal}. Only confirmations
  *       that ended in {@code VERIFIED_AND_ISSUED} store a certificate. If no
  *       such certificate exists, the response is {@code CERT_NOT_FOUND} —
  *       a circumvention signal in itself, since a settlement-time
  *       signature for an unknown cert serial cannot have come from a
  *       gatekeeper-audited issuance.</li>
+ *   <li>If {@code signingCertificatePem} is supplied, it must be byte-identical
+ *       to that stored certificate; otherwise the answer is
+ *       {@code CERT_NOT_FOUND}. The public key is always taken from the
+ *       stored certificate. Until 1.7.0 a supplied certificate was looked up
+ *       under its own serial and issuer instead, while the verdict was
+ *       signed over the request's.</li>
  * </ul>
  */
 @Data

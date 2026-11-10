@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Locale;
@@ -27,7 +28,8 @@ import java.util.Optional;
  *       token over SHA-256 of the entry's signature input (the UTF-8 bytes of
  *       {@code thisEntryHashHex}), validates it, and stores it on the entry as
  *       {@code timestampTokenBase64}, outside the hash. A TSA failure leaves
- *       the entry without a token; the entry is still written.</li>
+ *       the entry without a token; the entry is still written. So does a
+ *       token whose {@code genTime} is not the entry's time (below).</li>
  *   <li>{@code anchor} — {@link TimestampAnchorService} periodically asks for a
  *       token over the current chain head's {@code thisEntryHashHex} and
  *       appends {@code {headSequenceNumber, headHashHex, tokenBase64,
@@ -48,6 +50,21 @@ import java.util.Optional;
  * check validates every token it finds (entry tokens and anchor records).
  * When it is not set there is nothing to validate against, and tokens found
  * on disk are not checked.</p>
+ *
+ * <h2>An entry's token must be of the entry's time</h2>
+ *
+ * <p>An entry token is requested while the entry is being written, so its
+ * {@code genTime} and the entry's own timestamp differ only by the TSA round
+ * trip and by the difference between the two clocks. The chain check
+ * therefore also requires {@code |genTime − entry timestamp|} to be at most
+ * {@code entry-token-tolerance-seconds} (default 300), and a token outside
+ * that window is not stored in the first place. Until 1.7.0 only the token's
+ * validity for the entry's hash was checked, so whoever held the signing key
+ * could write the chain again, have every entry time-stamped anew, and pass
+ * the check: the new tokens were valid, and nothing compared their time with
+ * the time the entries claimed. The comparison does not replace a copy of the
+ * tokens outside the host: a token can still be removed together with the
+ * rewrite, which leaves the entry counted as untimestamped.</p>
  */
 @Component
 public class AuditTimestamping {
@@ -79,6 +96,10 @@ public class AuditTimestamping {
     private final TimestampTokenVerifier verifier;
     private final TimestampAnchorStore anchorStore;
     private final long anchorIntervalSeconds;
+    private final Duration entryTokenTolerance;
+
+    /** Default of {@code gatekeeper.timestamping.entry-token-tolerance-seconds}. */
+    public static final long DEFAULT_ENTRY_TOKEN_TOLERANCE_SECONDS = 300;
 
     @Autowired
     public AuditTimestamping(
@@ -91,8 +112,15 @@ public class AuditTimestamping {
             @Value("${gatekeeper.timestamping.trusted-certs-path:}") String trustedCertsPath,
             @Value("${gatekeeper.timestamping.anchor-interval-seconds:3600}") long anchorIntervalSeconds,
             @Value("${gatekeeper.timestamping.anchor-path:${gatekeeper.audit.path:./audit-log.jsonl}.tsa-anchors.jsonl}")
-            String anchorPath) {
+            String anchorPath,
+            @Value("${gatekeeper.timestamping.entry-token-tolerance-seconds:300}") long entryTokenToleranceSeconds) {
         this.mode = Mode.parse(mode);
+        // Checked in every mode: the chain check applies it to stored entry
+        // tokens whenever trusted TSA certificates are configured.
+        if (entryTokenToleranceSeconds <= 0) {
+            throw new IllegalStateException("gatekeeper.timestamping.entry-token-tolerance-seconds must be > 0");
+        }
+        this.entryTokenTolerance = Duration.ofSeconds(entryTokenToleranceSeconds);
         String alg = hashAlgorithm == null ? "" : hashAlgorithm.trim().toUpperCase(Locale.ROOT);
         if (!alg.equals("SHA-256") && !alg.equals("SHA256")) {
             throw new IllegalStateException("gatekeeper.timestamping.hash-algorithm must be SHA-256, got '"
@@ -126,23 +154,33 @@ public class AuditTimestamping {
         this.anchorStore = loadAnchorStore(anchorPath, this.mode, this.verifier);
         if (active) {
             log.info("AuditTimestamping: mode={}, tsa-url={}, policy-oid={}, trusted TSA certificates={}, "
-                            + "connect/read timeout={}ms/{}ms{}",
+                            + "entry-token tolerance={}s, connect/read timeout={}ms/{}ms{}",
                     this.mode.label(), tsaUrl, policyOid == null || policyOid.isBlank() ? "(TSA default)" : policyOid,
-                    verifier.trustedCertificates().size(), connectTimeoutMs, readTimeoutMs,
+                    verifier.trustedCertificates().size(), entryTokenToleranceSeconds,
+                    connectTimeoutMs, readTimeoutMs,
                     this.mode == Mode.ANCHOR ? ", anchor interval=" + anchorIntervalSeconds + "s, anchor file="
                             + anchorStore.path().toAbsolutePath() : "");
         }
     }
 
     /**
-     * Test and composition constructor.
+     * Test and composition constructor, with the default entry-token
+     * tolerance.
      *
      * @param anchorPath anchor file; may be {@code null} when not in
      *     {@code anchor} mode and no anchors are to be checked
      */
     public AuditTimestamping(Mode mode, TsaClient client, TimestampTokenVerifier verifier, Path anchorPath,
                              long anchorIntervalSeconds) {
+        this(mode, client, verifier, anchorPath, anchorIntervalSeconds,
+                Duration.ofSeconds(DEFAULT_ENTRY_TOKEN_TOLERANCE_SECONDS));
+    }
+
+    /** Test and composition constructor. */
+    public AuditTimestamping(Mode mode, TsaClient client, TimestampTokenVerifier verifier, Path anchorPath,
+                             long anchorIntervalSeconds, Duration entryTokenTolerance) {
         this.mode = mode;
+        this.entryTokenTolerance = entryTokenTolerance;
         if (mode != Mode.OFF && (client == null || verifier == null)) {
             throw new IllegalStateException("mode " + mode.label() + " requires a TSA client and a verifier");
         }
@@ -215,6 +253,38 @@ public class AuditTimestamping {
             log.warn("AuditTimestamping: no TSA token for {}: {}", thisEntryHashHex, e.toString());
             return Optional.empty();
         }
+    }
+
+    /**
+     * Entry mode: a token for the entry with this hash and this timestamp.
+     * Empty as {@link #timestampHashHex} is, and also when the TSA answers
+     * with a valid token whose {@code genTime} is not the entry's time
+     * ({@link #isEntryTime}): the chain check would refuse the entry with
+     * such a token, so it is written without one. Never throws.
+     */
+    public Optional<Token> timestampEntry(String thisEntryHashHex, Instant entryTimestamp) {
+        Optional<Token> token = timestampHashHex(thisEntryHashHex);
+        if (token.isPresent() && !isEntryTime(entryTimestamp, token.get().genTime())) {
+            log.warn("AuditTimestamping: TSA token for {} not stored: its genTime {} is more than {}s from the "
+                            + "entry's timestamp {} — compare the clock of this host with the TSA's",
+                    thisEntryHashHex, token.get().genTime(), entryTokenTolerance.toSeconds(), entryTimestamp);
+            return Optional.empty();
+        }
+        return token;
+    }
+
+    /**
+     * Whether {@code genTime} is the time of an entry with this timestamp: at
+     * most {@link #entryTokenTolerance()} before or after it.
+     */
+    public boolean isEntryTime(Instant entryTimestamp, Instant genTime) {
+        return genTime != null
+                && Duration.between(entryTimestamp, genTime).abs().compareTo(entryTokenTolerance) <= 0;
+    }
+
+    /** {@code gatekeeper.timestamping.entry-token-tolerance-seconds}. */
+    public Duration entryTokenTolerance() {
+        return entryTokenTolerance;
     }
 
     /** A validated token and its {@code genTime}. */

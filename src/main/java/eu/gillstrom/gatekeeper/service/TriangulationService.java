@@ -344,6 +344,11 @@ public class TriangulationService {
 
         int count = missingFromOperator.size() + missingFromBanks.size() + unverified.size()
                 + notReported.size() + mismatches.size();
+        // "Zero discrepancies" is a statement about a comparison, and there is
+        // none before both sides have reported. Until 1.7.0 an inquiry nobody
+        // had reported to was signed with zeroDiscrepancies=true and recorded
+        // as compliant.
+        boolean zeroDiscrepancies = count == 0 && operatorId != null && !banks.isEmpty();
         TriangulationReport unsigned = new TriangulationReport(
                 TriangulationCanonicalizer.REPORT_VERSION,
                 inquiry.id,
@@ -356,7 +361,7 @@ public class TriangulationService {
                 List.copyOf(notReported),
                 List.copyOf(mismatches),
                 count,
-                count == 0,
+                zeroDiscrepancies,
                 keyDirectory.activeFingerprintHex(),
                 null, null, null);
 
@@ -368,7 +373,7 @@ public class TriangulationService {
                 inquiry.id,
                 sha256Base64(TriangulationCanonicalizer.inputsCommitment(inquiry.id, inquiry.countryCode, digests)),
                 sha256Base64(canonical),
-                count == 0));
+                zeroDiscrepancies));
         return unsigned.sealed(signature, signer.getSignatureAlgorithm(), entry.thisEntryHashHex());
     }
 
@@ -429,7 +434,8 @@ public class TriangulationService {
     /**
      * The jurisdiction's entries that hold an issued certificate, keyed by
      * serial and canonical issuer name; where two hold the same certificate
-     * the more recent wins, as in settlement lookup.
+     * (possible only in a journal written by 1.7.0 or earlier) the one
+     * settlement lookup returns is compared.
      */
     private Registry registrySnapshot(String countryCode) {
         Registry registry = new Registry();
@@ -452,9 +458,10 @@ public class TriangulationService {
             lines.add(TriangulationCanonicalizer.registryEntryLine(serialHex, dn,
                     String.valueOf(e.getStatus()), e.getVerificationId()));
             String key = serialHex + '\u0000' + issuer.getName(X500Principal.CANONICAL);
-            // maxBy keeps the entry already held on a tie, as settlement lookup's Stream.max does.
+            // The entry settlement lookup returns for this certificate: same order, and
+            // maxBy keeps the entry already held on a tie, as its Stream.max does.
             registry.byCertificate.merge(key, new Held(e, serialHex, dn),
-                    BinaryOperator.maxBy(Comparator.comparing(Held::entry, ApprovalRegistry.recency())));
+                    BinaryOperator.maxBy(Comparator.comparing(Held::entry, ApprovalRegistry.certificatePrecedence())));
         }
         registry.digest = new InputDigest(null, lines.size(), TriangulationCanonicalizer.sha256Hex(
                 TriangulationCanonicalizer.inputBytes(TriangulationCanonicalizer.registryHeader(countryCode), lines)));

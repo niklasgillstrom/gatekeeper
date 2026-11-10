@@ -127,6 +127,26 @@ class VerificationControllerConfirmScopeTest {
                 .andExpect(jsonPath("$.signature").value("c2ln"));
     }
 
+    @Test
+    void aCertificateAlreadyRegisteredIs409WithTheSignedBody() throws Exception {
+        when(verificationService.confirmIssuance(any(), any())).thenReturn(IssuanceConfirmationResponse.builder()
+                .verificationId("v-5")
+                .loopClosed(false)
+                .registryStatus(RegistryStatus.ANOMALY_CERTIFICATE_ALREADY_REGISTERED)
+                .processedTimestamp(Instant.now().toString())
+                .anomalies(List.of("ANOMALY: already registered"))
+                .signature("c2ln")
+                .build());
+
+        mockMvc.perform(post("/v1/attestation/SE/confirm")
+                        .contentType("application/json")
+                        .content(json.writeValueAsString(confirmation("v-5"))))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.registryStatus").value("ANOMALY_CERTIFICATE_ALREADY_REGISTERED"))
+                .andExpect(jsonPath("$.loopClosed").value(false))
+                .andExpect(jsonPath("$.signature").value("c2ln"));
+    }
+
     private static IssuanceConfirmation confirmation(String verificationId) {
         IssuanceConfirmation confirmation = new IssuanceConfirmation();
         confirmation.setVerificationId(verificationId);

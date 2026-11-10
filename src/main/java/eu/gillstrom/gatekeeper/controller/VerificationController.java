@@ -17,6 +17,7 @@ import eu.gillstrom.gatekeeper.service.VerificationService;
 import eu.gillstrom.gatekeeper.verification.TrustAnchors;
 
 import java.util.List;
+import java.util.Locale;
 
 /**
  * NCA Gatekeeper API Controller.
@@ -130,7 +131,7 @@ public class VerificationController {
     public ResponseEntity<VerificationResponse> verify(
             @PathVariable String countryCode,
             @Valid @RequestBody VerificationRequest request) {
-        request.setCountryCode(countryCode.toUpperCase());
+        request.setCountryCode(countryCode.toUpperCase(Locale.ROOT));
         VerificationResponse response = verificationService.verify(request);
         return ResponseEntity.ok(response);
     }
@@ -165,6 +166,10 @@ public class VerificationController {
             @ApiResponse(responseCode = "400", description = "Invalid confirmation format, "
                     + "or submitted confirmationNonce does not match the nonce bound to the "
                     + "verificationId at verify time (Step-7 replay attempt)"),
+            @ApiResponse(responseCode = "409", description = "The submitted signing certificate "
+                    + "is already registered under another verification. An issued certificate "
+                    + "is recorded on one registry entry only; the entry confirmed is left "
+                    + "unchanged and its nonce unspent."),
             @ApiResponse(responseCode = "404", description = "No verification with this ID "
                     + "in this jurisdiction that this client may confirm. The same response "
                     + "is returned for an unknown verificationId, for one belonging to "
@@ -177,7 +182,7 @@ public class VerificationController {
             @PathVariable String countryCode,
             @Valid @RequestBody IssuanceConfirmation confirmation) {
         IssuanceConfirmationResponse response =
-                verificationService.confirmIssuance(confirmation, countryCode.toUpperCase());
+                verificationService.confirmIssuance(confirmation, countryCode.toUpperCase(Locale.ROOT));
         if (response.getRegistryStatus()
                 == IssuanceConfirmationResponse.RegistryStatus.ANOMALY_UNKNOWN_VERIFICATION) {
             // 404, matching the documented contract. The body is the
@@ -193,6 +198,13 @@ public class VerificationController {
             // registry has logged the mismatch at WARN and the service has
             // appended a CONFIRM audit entry for it.
             return ResponseEntity.badRequest().body(response);
+        }
+        if (response.getRegistryStatus()
+                == IssuanceConfirmationResponse.RegistryStatus.ANOMALY_CERTIFICATE_ALREADY_REGISTERED) {
+            // The certificate is already stored on another registry entry;
+            // nothing was changed. 409 with the service's signed response,
+            // audited as a CONFIRM entry like the nonce mismatch.
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(response);
         }
         return ResponseEntity.ok(response);
     }
@@ -240,7 +252,7 @@ public class VerificationController {
                     "Batch contains " + requests.size() + " entries; the maximum is "
                             + MAX_BATCH_SIZE + ". Split the submission.");
         }
-        requests.forEach(r -> r.setCountryCode(countryCode.toUpperCase()));
+        requests.forEach(r -> r.setCountryCode(countryCode.toUpperCase(Locale.ROOT)));
         BatchVerificationResponse response = verificationService.verifyBatch(requests);
         return ResponseEntity.ok(response);
     }
@@ -255,7 +267,7 @@ public class VerificationController {
         description = "Returns aggregate compliance statistics from the approval registry.")
     public ResponseEntity<ApprovalRegistry.ComplianceStats> registryStats(
             @PathVariable String countryCode) {
-        return ResponseEntity.ok(approvalRegistry.getStats(countryCode.toUpperCase()));
+        return ResponseEntity.ok(approvalRegistry.getStats(countryCode.toUpperCase(Locale.ROOT)));
     }
 
     @GetMapping("/{countryCode}/registry/anomalies")
@@ -271,7 +283,7 @@ public class VerificationController {
     public ResponseEntity<List<ApprovalRegistry.RegistryEntry>> registryAnomalies(
             @PathVariable String countryCode) {
         return ResponseEntity.ok(withoutNonces(
-                approvalRegistry.findAnomalies(countryCode.toUpperCase())));
+                approvalRegistry.findAnomalies(countryCode.toUpperCase(Locale.ROOT))));
     }
 
     @GetMapping("/{countryCode}/registry/awaiting")
@@ -285,7 +297,7 @@ public class VerificationController {
     public ResponseEntity<List<ApprovalRegistry.RegistryEntry>> registryAwaiting(
             @PathVariable String countryCode) {
         return ResponseEntity.ok(withoutNonces(
-                approvalRegistry.findAwaitingConfirmation(countryCode.toUpperCase())));
+                approvalRegistry.findAwaitingConfirmation(countryCode.toUpperCase(Locale.ROOT))));
     }
 
     /**

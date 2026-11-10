@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.Signature;
@@ -68,6 +69,10 @@ class TriangulationServiceTest {
     }
 
     private void issued(String id, String serialHex, String country) {
+        issued(registry, id, serialHex, country);
+    }
+
+    private static void issued(ApprovalRegistry registry, String id, String serialHex, String country) {
         registry.register(id, "n-" + id, true, "fp-" + id, "5569743098", "TL AB", "SECUROSYS", "Primus HSM",
                 country);
         registry.confirm(id, "n-" + id, true, "fp-" + id, true,
@@ -243,6 +248,47 @@ class TriangulationServiceTest {
         assertThat(auditLog.head().orElseThrow().compliant()).isTrue();
     }
 
+    /**
+     * "Zero discrepancies" says that a comparison found none. Until 1.7.0 an
+     * inquiry nobody had reported to was signed with zeroDiscrepancies=true
+     * and recorded as compliant, and so was one with only one side in it.
+     */
+    @Test
+    void anInquiryWithoutBothSidesIsNotAZeroDiscrepancyResult() {
+        TriangulationService service = service(10, 1000);
+
+        String empty = service.createInquiry("SE").inquiryId();
+        TriangulationReport nothing = service.discrepancies("SE", empty);
+        assertThat(nothing.discrepancyCount()).isZero();
+        assertThat(nothing.inputDigests().bankReports()).isEmpty();
+        assertThat(nothing.inputDigests().operatorReport()).isNull();
+        assertThat(nothing.zeroDiscrepancies()).as("nothing was compared").isFalse();
+        assertThat(auditLog.head().orElseThrow().compliant()).isFalse();
+
+        // A side that has reported nothing has still reported; the other has not.
+        String banksOnly = service.createInquiry("SE").inquiryId();
+        service.addBankReport("SE", banksOnly, bankReport("bank-1", List.of()));
+        TriangulationReport withoutOperator = service.discrepancies("SE", banksOnly);
+        assertThat(withoutOperator.discrepancyCount()).isZero();
+        assertThat(withoutOperator.zeroDiscrepancies()).isFalse();
+        assertThat(auditLog.head().orElseThrow().compliant()).isFalse();
+
+        String operatorOnly = service.createInquiry("SE").inquiryId();
+        service.addOperatorReport("SE", operatorOnly, operatorReport("op-1", List.of()));
+        TriangulationReport withoutBanks = service.discrepancies("SE", operatorOnly);
+        assertThat(withoutBanks.discrepancyCount()).isZero();
+        assertThat(withoutBanks.zeroDiscrepancies()).isFalse();
+        assertThat(auditLog.head().orElseThrow().compliant()).isFalse();
+
+        // Both sides, each with nothing to report: compared, and no discrepancy.
+        service.addBankReport("SE", banksOnly, bankReport("bank-2", List.of()));
+        service.addOperatorReport("SE", banksOnly, operatorReport("op-1", List.of()));
+        TriangulationReport compared = service.discrepancies("SE", banksOnly);
+        assertThat(compared.discrepancyCount()).isZero();
+        assertThat(compared.zeroDiscrepancies()).isTrue();
+        assertThat(auditLog.head().orElseThrow().compliant()).isTrue();
+    }
+
     @Test
     void banksReportBeforeTheOperatorAndThereIsOneOperator() {
         TriangulationService service = service(10, 1000);
@@ -336,20 +382,38 @@ class TriangulationServiceTest {
         assertThat(list).isSortedAccordingTo(java.util.Comparator.comparing(line));
     }
 
+    /**
+     * Confirmation stores a certificate on one entry only, so two holders
+     * exist only in a journal written by 1.7.0 or earlier. Here the earlier
+     * entry was revoked and a later one confirmed the same certificate again;
+     * the journal is built by writing two certificates and giving the later
+     * one the earlier one's serial.
+     */
     @Test
-    void ofTwoEntriesHoldingOneCertificateTheMoreRecentIsCompared() throws Exception {
-        TriangulationService service = service(1, 100);
-        issued("VID-OLD", "f6", "SE");
+    void ofTwoEntriesHoldingOneCertificateTheOneSettlementFollowsIsCompared() throws Exception {
+        Path journal = tempDir.resolve("earlier-registry.jsonl");
+        AppendOnlyFileApprovalRegistry writer = new AppendOnlyFileApprovalRegistry(journal.toString());
+        writer.initialise();
+        issued(writer, "VID-OLD", "f6", "SE");
         Thread.sleep(5);
-        issued("VID-NEW", "f6", "SE");
-        registry.changeStatus("VID-NEW", RegistryStatus.REVOKED, "compromise", null);
+        issued(writer, "VID-NEW", "f7", "SE");
+        writer.changeStatus("VID-OLD", RegistryStatus.REVOKED, "compromise", null);
+        Files.writeString(journal, Files.readString(journal)
+                .replace("\"issuedCertificateSerial\":\"f7\"", "\"issuedCertificateSerial\":\"f6\""));
+        AppendOnlyFileApprovalRegistry earlier = new AppendOnlyFileApprovalRegistry(journal.toString());
+        earlier.initialise();
+        assertThat(earlier.findByCountry("SE"))
+                .extracting(ApprovalRegistry.RegistryEntry::getIssuedCertificateSerial).containsExactly("f6", "f6");
+
+        TriangulationService service = new TriangulationService(earlier, auditLog, new MtlsPrincipalResolver(),
+                signer, keyDirectory, 1, 100);
         String id = service.createInquiry("SE").inquiryId();
         service.addBankReport("SE", id, bankReport("bank-1", List.of(bank("5560000001", "1231111111", null))));
         service.addOperatorReport("SE", id, operatorReport("op-1", List.of(operator("1231111111", null, "f6"))));
 
         TriangulationReport report = service.discrepancies("SE", id);
         assertThat(report.certificatesWithoutVerifiedAttestation()).singleElement().satisfies(d -> {
-            assertThat(d.verificationId()).isEqualTo("VID-NEW");
+            assertThat(d.verificationId()).isEqualTo("VID-OLD");
             assertThat(d.registryStatus()).isEqualTo("REVOKED");
         });
         assertThat(report.verifiedCertificatesNotReportedByOperator()).isEmpty();

@@ -308,8 +308,25 @@ public class SignatureVerificationService {
         //    a key that had been verified but never issued settled.
         // A presented PEM is therefore only accepted if it is byte-identical
         // to the certificate stored at confirmation.
+        //
+        // The entry is always looked up under the request's certSerial and
+        // issuerDn, with or without a PEM: they are the identifiers the signed
+        // verdict names. Until 1.7.0 a presented PEM replaced them in the
+        // lookup while the verdict was still signed over them, so a request
+        // rewritten in transit to carry another, compliant certificate and its
+        // signature was answered OK, signed for the identifiers of the
+        // certificate the caller had asked about.
+        if (isBlank(request.getCertSerial()) || isBlank(request.getIssuerDn())) {
+            return deny(false, null, "MALFORMED_INPUT");
+        }
         BigInteger serial;
         X500Principal issuer;
+        try {
+            serial = parseSerialHex(request.getCertSerial());
+            issuer = new X500Principal(request.getIssuerDn());
+        } catch (IllegalArgumentException e) {
+            return deny(false, null, "MALFORMED_INPUT");
+        }
         X509Certificate presented = null;
         String presentedPem = request.getSigningCertificatePem();
         if (presentedPem != null && !presentedPem.isBlank()) {
@@ -317,18 +334,6 @@ public class SignatureVerificationService {
                 presented = parseCertificate(presentedPem);
             } catch (Exception e) {
                 log.warn("Settlement-time verify: certificate parse failure: {}", e.getMessage());
-                return deny(false, null, "MALFORMED_INPUT");
-            }
-            serial = presented.getSerialNumber();
-            issuer = presented.getIssuerX500Principal();
-        } else {
-            if (isBlank(request.getCertSerial()) || isBlank(request.getIssuerDn())) {
-                return deny(false, null, "MALFORMED_INPUT");
-            }
-            try {
-                serial = parseSerialHex(request.getCertSerial());
-                issuer = new X500Principal(request.getIssuerDn());
-            } catch (IllegalArgumentException e) {
                 return deny(false, null, "MALFORMED_INPUT");
             }
         }

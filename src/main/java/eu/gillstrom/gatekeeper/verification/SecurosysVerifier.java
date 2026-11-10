@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.w3c.dom.Document;
+import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import eu.gillstrom.gatekeeper.model.HsmVendor;
@@ -34,6 +35,9 @@ import java.util.regex.Pattern;
 public class SecurosysVerifier implements HsmAttestationVerifier {
 
     private static final Logger log = LoggerFactory.getLogger(SecurosysVerifier.class);
+
+    /** Deepest element nesting accepted in an attestation; see {@link #parseXmlSafely}. */
+    static final int MAX_ELEMENT_DEPTH = 64;
 
     // Securosys Primus HSM Root CA (production)
     //
@@ -206,9 +210,11 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
             // Parse XML with XXE protection and extract the relevant fields
             // through the DOM rather than regex.
             Document doc = parseXmlSafely(xmlBytes);
+            Element root = doc.getDocumentElement();
 
-            byte[] xmlPubKeyBytes = extractPublicKey(doc);
+            byte[] xmlPubKeyBytes = extractPublicKey(doc, root);
             if (xmlPubKeyBytes == null) {
+                // Missing, repeated, not a child of the root, or not Base64.
                 result.addError("Could not extract public_key from XML");
             } else {
                 byte[] csrPubKeyBytes = csrPublicKey.getEncoded();
@@ -219,10 +225,16 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
                 }
             }
 
-            boolean extractable = extractBooleanAttribute(doc, "extractable");
-            boolean neverExtractable = extractBooleanAttribute(doc, "never_extractable");
-            boolean sensitive = extractBooleanAttribute(doc, "sensitive");
-            boolean alwaysSensitive = extractBooleanAttribute(doc, "always_sensitive");
+            // Each of the four is read from the one place the HSM writes it, as
+            // "true" or "false". An attribute that is missing, repeated or
+            // somewhere else counts as the unsafe value: until 1.7.0 the first
+            // element of that name anywhere in the document was read, and an
+            // attestation without <extractable> passed as extractable=false.
+            Node attributes = onlyElement(doc, root, "attributes");
+            boolean extractable = !"false".equals(onlyLeafText(doc, attributes, "extractable"));
+            boolean neverExtractable = "true".equals(onlyLeafText(doc, attributes, "never_extractable"));
+            boolean sensitive = "true".equals(onlyLeafText(doc, attributes, "sensitive"));
+            boolean alwaysSensitive = "true".equals(onlyLeafText(doc, attributes, "always_sensitive"));
 
             if (extractable) result.addError("Key attribute extractable must be false");
             if (!neverExtractable) result.addError("Key attribute never_extractable must be true");
@@ -239,8 +251,7 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
             // and always_sensitive are not origin attributes (PKCS#11 keeps
             // origin in CKA_LOCAL), so a key created outside the HSM and
             // imported with extractable=false is not excluded by them.
-            String creation = "private_key".equals(doc.getDocumentElement().getTagName())
-                    ? doc.getDocumentElement().getAttribute("creation") : "";
+            String creation = "private_key".equals(root.getTagName()) ? root.getAttribute("creation") : "";
             result.setKeyOrigin(creation.isEmpty() ? null : creation);
             boolean generated = "generated".equals(creation);
             if (!generated) {
@@ -285,12 +296,20 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
      * entity reference other than the five predefined ones, so the separate
      * entity and external-DTD switches have nothing left to act on. XInclude is
      * off by default ({@link DocumentBuilderFactory#isXIncludeAware()}).</p>
+     *
+     * <p>Elements nested deeper than {@value #MAX_ELEMENT_DEPTH} are a fatal
+     * error as well. JDK 21 sets no such limit itself, and the DOM methods
+     * this class reads the document with recurse once per level: an
+     * attestation of 49 kB nested 7 000 deep ended in a
+     * {@code StackOverflowError} instead of a refusal. A Primus attestation
+     * is three levels deep.</p>
      */
-    private Document parseXmlSafely(byte[] xmlBytes) throws Exception {
+    static Document parseXmlSafely(byte[] xmlBytes) throws Exception {
         // newDefaultInstance() is always the JDK's built-in parser, whatever else
         // is on the classpath; it applies the jdk.xml.* resource limits by default.
         DocumentBuilderFactory dbf = DocumentBuilderFactory.newDefaultInstance();
         dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        dbf.setAttribute("jdk.xml.maxElementDepth", MAX_ELEMENT_DEPTH);
         DocumentBuilder db = dbf.newDocumentBuilder();
         return db.parse(new ByteArrayInputStream(xmlBytes));
     }
@@ -347,22 +366,50 @@ public class SecurosysVerifier implements HsmAttestationVerifier {
         }
     }
 
-    private byte[] extractPublicKey(Document doc) {
-        String pubKeyB64 = firstElementText(doc, "public_key");
+    private byte[] extractPublicKey(Document doc, Element root) {
+        String pubKeyB64 = onlyLeafText(doc, root, "public_key");
         if (pubKeyB64 == null) {
             return null;
         }
         try {
-            return Base64.getDecoder().decode(pubKeyB64.trim());
+            return Base64.getDecoder().decode(pubKeyB64);
         } catch (IllegalArgumentException e) {
             log.warn("Securosys attestation public_key is not valid Base64: {}", e.getMessage());
             return null;
         }
     }
 
-    private boolean extractBooleanAttribute(Document doc, String tagName) {
-        String value = firstElementText(doc, tagName);
-        return "true".equalsIgnoreCase(value);
+    /**
+     * The element named {@code tagName}, if the document has exactly one and
+     * it is a child of {@code parent}; otherwise {@code null}.
+     *
+     * <p>The key's label is chosen by whoever creates the key and stands
+     * before {@code public_key} and {@code attributes} in the attestation. If
+     * a label could carry markup into the document, a second
+     * {@code public_key} or {@code attributes} element would come first in
+     * document order. Whether a Primus HSM escapes the label has not been
+     * established; with this rule the answer does not matter, because a
+     * document in which a name the verdict depends on occurs twice, or
+     * elsewhere than where the HSM writes it, is not read at all.</p>
+     */
+    private static Node onlyElement(Document doc, Node parent, String tagName) {
+        NodeList nl = doc.getElementsByTagName(tagName);
+        if (nl.getLength() != 1 || nl.item(0).getParentNode() != parent) {
+            return null;
+        }
+        return nl.item(0);
+    }
+
+    /**
+     * The trimmed text of {@link #onlyElement}, if that element contains no
+     * element of its own; otherwise {@code null}.
+     */
+    private static String onlyLeafText(Document doc, Node parent, String tagName) {
+        Node node = onlyElement(doc, parent, tagName);
+        if (node == null || ((Element) node).getElementsByTagName("*").getLength() != 0) {
+            return null;
+        }
+        return node.getTextContent().trim();
     }
 
     private String firstElementText(Document doc, String tagName) {

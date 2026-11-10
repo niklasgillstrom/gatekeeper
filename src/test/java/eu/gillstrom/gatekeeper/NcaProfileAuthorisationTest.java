@@ -18,6 +18,8 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.head;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 
 /**
@@ -115,6 +117,18 @@ class NcaProfileAuthorisationTest {
             refused(get("/v1/audit/export"), cn);
             refused(get("/v1/gatekeeper/health"), cn);
             refused(get("/v1/attestation/SE/registry/stats"), cn);
+        }
+        // Spring MVC answers HEAD from a GET handler, so the rule must not be
+        // for GET alone: until 1.7.0 a HEAD on the registry paths was answered
+        // (200, no body) to any client certificate.
+        for (String path : new String[] {"/v1/attestation/SE/registry/stats",
+                "/v1/attestation/SE/registry/anomalies", "/v1/attestation/SE/registry/awaiting",
+                "/v1/gatekeeper/health", "/v1/audit/export"}) {
+            reached(head(path), "FI-supervisor");
+            for (String cn : new String[] {"FE-bank", "RAIL-riksbank", "Unmapped-client", null}) {
+                refused(head(path), cn);
+                refused(options(path), cn);
+            }
         }
     }
 

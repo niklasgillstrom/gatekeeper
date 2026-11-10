@@ -165,8 +165,14 @@ public class SecurityConfig {
                 // recomputed per call (see AuditLog.cachedIntegrityStatus).
                 // Liveness probes use /v1/attestation/health, which stays
                 // public and touches nothing.
-                .requestMatchers(HttpMethod.GET, "/v1/gatekeeper/health").hasRole("SUPERVISOR")
-                .requestMatchers(HttpMethod.GET, "/v1/attestation/*/registry/**").hasRole("SUPERVISOR")
+                //
+                // Both rules cover every method. Until 1.7.0 they named GET
+                // only, and Spring MVC answers HEAD from a GET handler: a HEAD
+                // under /registry/** fell through to the "authenticated" rule
+                // at the end and was answered, without a body, to any client
+                // certificate.
+                .requestMatchers("/v1/gatekeeper/health").hasRole("SUPERVISOR")
+                .requestMatchers("/v1/attestation/*/registry/**").hasRole("SUPERVISOR")
 
                 // FE or supervisor — the verification protocol itself.
                 // The supervisor can also call these (useful for sandbox

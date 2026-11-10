@@ -79,4 +79,66 @@ class TimestampAnchorStoreTest {
 
         assertThat(new TimestampAnchorStore(file).readFromDisk()).containsExactly(record(1));
     }
+
+    /**
+     * The anchor file is appended to as the audit log is. Until 1.7.0 a record
+     * appended after a torn one continued on its line; once another record
+     * followed, the file was corrupt, the chain check failed and the store
+     * did not load.
+     */
+    @Test
+    void aRecordAppendedAfterATornOneStartsItsOwnLine() throws Exception {
+        Path file = tempDir.resolve("anchors.jsonl");
+        TimestampAnchorStore store = new TimestampAnchorStore(file);
+        store.append(record(1));
+        Files.writeString(file, Files.readString(file) + "{\"headSequenceNumber\":2,", StandardCharsets.UTF_8);
+
+        store.append(record(3));
+        store.append(record(4));
+
+        assertThat(Files.readAllLines(file, StandardCharsets.UTF_8)).hasSize(3);
+        assertThat(store.readFromDisk()).containsExactly(record(1), record(3), record(4));
+        TimestampAnchorStore reloaded = new TimestampAnchorStore(file);
+        reloaded.load();
+        assertThat(reloaded.records()).containsExactly(record(1), record(3), record(4));
+    }
+
+    @Test
+    void aWholeLastRecordWithoutItsNewlineIsKeptAndGivenOne() throws Exception {
+        Path file = tempDir.resolve("anchors.jsonl");
+        TimestampAnchorStore writer = new TimestampAnchorStore(file);
+        writer.append(record(1));
+        writer.append(record(2));
+        String content = Files.readString(file);
+        Files.writeString(file, content.substring(0, content.length() - 1), StandardCharsets.UTF_8);
+
+        TimestampAnchorStore store = new TimestampAnchorStore(file);
+        store.load();
+
+        assertThat(store.records()).containsExactly(record(1), record(2));
+        assertThat(Files.readString(file)).isEqualTo(content);
+        store.append(record(3));
+        assertThat(store.readFromDisk()).containsExactly(record(1), record(2), record(3));
+    }
+
+    @Test
+    void aFileThatEndsInANewlineIsLoadedWithoutBeingWritten() throws Exception {
+        Path file = tempDir.resolve("anchors.jsonl");
+        new TimestampAnchorStore(file).append(record(1));
+        byte[] before = Files.readAllBytes(file);
+        ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger)
+                org.slf4j.LoggerFactory.getLogger(TimestampAnchorStore.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+                new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            new TimestampAnchorStore(file).load();
+        } finally {
+            logger.detachAppender(logs);
+        }
+
+        assertThat(Files.readAllBytes(file)).isEqualTo(before);
+        assertThat(logs.list).isEmpty();
+    }
 }

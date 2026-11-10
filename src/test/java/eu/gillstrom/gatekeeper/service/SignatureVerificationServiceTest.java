@@ -454,7 +454,7 @@ class SignatureVerificationServiceTest {
         byte[] signature = sig.sign();
 
         return SignatureVerificationRequest.builder()
-                .certSerial(signingCert.getSerialNumber().toString())
+                .certSerial(signingCert.getSerialNumber().toString(16))
                 .issuerDn(signingCert.getIssuerX500Principal().getName())
                 .digestHex(HexFormat.of().formatHex(digest))
                 .signatureBase64(Base64.getEncoder().encodeToString(signature))

@@ -24,6 +24,15 @@ server:
 spring:
   application:
     name: gatekeeper
+  web:
+    resources:
+      # The gatekeeper serves an API and no static files. Left at its default,
+      # Spring Boot maps /webjars/** to every WebJar on the class path, and
+      # the swagger-ui package that springdoc depends on was served there in
+      # every profile without the mTLS filter chain, whatever
+      # springdoc.swagger-ui.enabled says. In the dev profile springdoc serves
+      # the UI through its own handler.
+      add-mappings: false
   servlet:
     multipart:
       # The gatekeeper has no multipart endpoints. Set low rather than left

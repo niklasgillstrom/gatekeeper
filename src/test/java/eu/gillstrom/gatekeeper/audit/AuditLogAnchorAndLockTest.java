@@ -98,6 +98,54 @@ class AuditLogAnchorAndLockTest {
         assertThat(restarted.verifyChainIntegrity()).isFalse();
     }
 
+    /**
+     * The record's genTime is a copy of the token's, and the copy is what
+     * /anchor, /anchor/timestamps and /health report. Until 1.7.0 the two
+     * were never compared, so the copy could be edited in the anchor file and
+     * the chain check still passed.
+     */
+    @Test
+    void anAnchorWhoseStatedTimeIsNotItsTokensBreaksTheChain() throws Exception {
+        Path audit = tempDir.resolve("retimed.jsonl");
+        Path anchorFile = tempDir.resolve("retimed.jsonl.tsa-anchors.jsonl");
+        AuditTimestamping ts = new AuditTimestamping(AuditTimestamping.Mode.ANCHOR, trustedTsa, trustedTsa.verifier(),
+                anchorFile, 3600);
+        AppendOnlyFileAuditLog log = new AppendOnlyFileAuditLog(audit.toString(), signer, 0, null, ts);
+        log.initialise();
+        log.append(request("v-1"));
+        new TimestampAnchorService(log, ts).anchorNow().orElseThrow();
+        assertThat(log.verifyChainIntegrity()).isTrue();
+        String original = Files.readString(anchorFile, StandardCharsets.UTF_8);
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+
+        for (String stated : new String[] {"2020-01-01T00:00:00Z", null}) {
+            ObjectNode node = (ObjectNode) mapper.readTree(original.lines().findFirst().orElseThrow());
+            assertThat(node.path("genTime").asText()).as("the token's time, as an ISO instant").endsWith("Z");
+            node.put("genTime", stated);
+            Files.writeString(anchorFile, mapper.writeValueAsString(node) + "\n", StandardCharsets.UTF_8);
+
+            ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger)
+                    org.slf4j.LoggerFactory.getLogger(AppendOnlyFileAuditLog.class);
+            ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+                    new ch.qos.logback.core.read.ListAppender<>();
+            logs.start();
+            logger.addAppender(logs);
+            try {
+                assertThat(log.verifyChainIntegrity()).as("stated genTime %s", stated).isFalse();
+            } finally {
+                logger.detachAppender(logs);
+            }
+            assertThat(logs.list).map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                    .anySatisfy(m -> assertThat(m).startsWith("AuditLog chain check failed: timestamp anchor for "
+                            + "sequenceNumber 1 states genTime " + (stated == null ? "null" : stated)
+                            + " but its token was issued at "));
+        }
+
+        // Put back, the chain is intact again: nothing else was wrong with it.
+        Files.writeString(anchorFile, original, StandardCharsets.UTF_8);
+        assertThat(log.verifyChainIntegrity()).isTrue();
+    }
+
     @Test
     void anImplementationThatDoesNotCountUntimestampedEntriesReportsNoCount() {
         assertThat(mock(AuditLog.class, CALLS_REAL_METHODS).untimestampedEntryCount()).isEmpty();

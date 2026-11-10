@@ -7,7 +7,7 @@ import java.util.List;
 
 final class E2eConfig {
 
-    static final String VERSION = "1.7.0";
+    static final String VERSION = "1.8.0";
 
     static final Path BASE_DIR = Path.of(System.getProperty("basedir", System.getProperty("user.dir")))
             .toAbsolutePath().normalize();

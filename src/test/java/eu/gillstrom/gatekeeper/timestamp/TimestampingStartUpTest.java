@@ -56,7 +56,7 @@ class TimestampingStartUpTest {
         Path trust = tsa.writeTrustPem(tempDir.resolve("trust-" + mode + ".pem"));
         Path anchors = tempDir.resolve("anchors-" + mode + ".jsonl");
         new AuditTimestamping(mode, TSA_URL, "SHA-256", policyOid, 1000, 2000, trust.toString(), 60,
-                anchors.toString());
+                anchors.toString(), 240);
         List<String> info = logs.list.stream().filter(e -> e.getLevel() == Level.INFO)
                 .map(ILoggingEvent::getFormattedMessage).filter(m -> m.startsWith("AuditTimestamping: mode=")).toList();
         assertThat(info).hasSize(1);
@@ -65,7 +65,8 @@ class TimestampingStartUpTest {
 
     @Test
     void theStartUpLineNamesThePolicyOrTheTsaDefaultAndTheAnchorSettingsInAnchorModeOnly() throws Exception {
-        assertThat(startUpLine("entry", null)).contains("policy-oid=(TSA default),").endsWith("timeout=1000ms/2000ms");
+        assertThat(startUpLine("entry", null)).contains("policy-oid=(TSA default),")
+                .contains(", entry-token tolerance=240s,").endsWith("timeout=1000ms/2000ms");
         assertThat(startUpLine("entry", " ")).contains("policy-oid=(TSA default),");
         assertThat(startUpLine("entry", "1.2.3.4")).contains("policy-oid=1.2.3.4,");
         assertThat(startUpLine("anchor", "")).contains(", anchor interval=60s, anchor file=")

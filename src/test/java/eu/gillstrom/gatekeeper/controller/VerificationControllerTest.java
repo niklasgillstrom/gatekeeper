@@ -73,6 +73,8 @@ class VerificationControllerTest {
         assertThat(confirm(RegistryStatus.ANOMALY_PUBLIC_KEY_MISMATCH).getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(confirm(RegistryStatus.ANOMALY_UNKNOWN_VERIFICATION).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         assertThat(confirm(RegistryStatus.ANOMALY_NONCE_MISMATCH).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(confirm(RegistryStatus.ANOMALY_CERTIFICATE_ALREADY_REGISTERED).getStatusCode())
+                .isEqualTo(HttpStatus.CONFLICT);
     }
 
     @Test
@@ -95,6 +97,45 @@ class VerificationControllerTest {
         assertThat(controller.registryStats("se").getBody())
                 .isEqualTo(new ApprovalRegistry.ComplianceStats(2, 0, 1, 0.0));
         assertThat(controller.registryAwaiting("se").getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    /**
+     * Until 1.7.0 the path's country code was upper-cased with the JVM's
+     * default locale. Under a Turkish one "fi" became "Fİ": a Finnish request
+     * was registered in a jurisdiction that does not exist, and the registry
+     * views for "fi" were empty.
+     */
+    @Test
+    void theCountryCodeIsReadTheSameInEveryLocale() {
+        java.util.Locale original = java.util.Locale.getDefault();
+        java.util.Locale.setDefault(java.util.Locale.forLanguageTag("tr-TR"));
+        try {
+            assertThat("fi".toUpperCase()).as("the locale this test needs").isNotEqualTo("FI");
+            when(service.verify(any())).thenReturn(VerificationResponse.builder().verificationId("V").build());
+            when(service.verifyBatch(anyList())).thenReturn(BatchVerificationResponse.builder().build());
+            IssuanceConfirmationResponse confirmed = IssuanceConfirmationResponse.builder()
+                    .registryStatus(RegistryStatus.VERIFIED_AND_ISSUED).build();
+            when(service.confirmIssuance(any(), eq("FI"))).thenReturn(confirmed);
+            registry.register("FI-1", "nonce", true, "fp", "1234567-8", "Toimittaja", "SECUROSYS", "Primus HSM", "FI");
+            registry.register("FI-2", "nonce", false, "fp-2", "1234567-8", "Toimittaja", null, null, "FI");
+            registry.confirm("FI-2", "nonce", true, "fp-2", true);
+
+            VerificationRequest single = new VerificationRequest();
+            controller.verify("fi", single);
+            VerificationRequest batched = new VerificationRequest();
+            controller.verifyBatch("fi", List.of(batched));
+
+            assertThat(single.getCountryCode()).isEqualTo("FI");
+            assertThat(batched.getCountryCode()).isEqualTo("FI");
+            assertThat(controller.confirmIssuance("fi", new IssuanceConfirmation()).getBody()).isSameAs(confirmed);
+            assertThat(controller.registryAwaiting("fi").getBody())
+                    .extracting(ApprovalRegistry.RegistryEntry::getVerificationId).containsExactly("FI-1");
+            assertThat(controller.registryAnomalies("fi").getBody())
+                    .extracting(ApprovalRegistry.RegistryEntry::getVerificationId).containsExactly("FI-2");
+            assertThat(controller.registryStats("fi").getBody().total()).isEqualTo(2);
+        } finally {
+            java.util.Locale.setDefault(original);
+        }
     }
 
     @Test
